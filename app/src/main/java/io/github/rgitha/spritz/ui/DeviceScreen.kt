@@ -122,7 +122,7 @@ class DeviceViewModel(app: Application, val address: String) : AndroidViewModel(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceScreen(address: String, onBack: () -> Unit, onSchedules: () -> Unit) {
+fun DeviceScreen(address: String, onBack: () -> Unit, onSchedules: () -> Unit, onLog: () -> Unit) {
     val app = LocalContext.current.applicationContext as Application
     val vm: DeviceViewModel = viewModel(key = address) { DeviceViewModel(app, address) }
     val device by vm.device.collectAsState(initial = null)
@@ -154,6 +154,7 @@ fun DeviceScreen(address: String, onBack: () -> Unit, onSchedules: () -> Unit) {
                             enabled = !isWidget,
                             onClick = { menu = false; vm.useForWidget() },
                         )
+                        DropdownMenuItem(text = { Text("Connection log") }, onClick = { menu = false; onLog() })
                         DropdownMenuItem(text = { Text("Remove") }, onClick = { menu = false; confirmRemove = true })
                     }
                 },

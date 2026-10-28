@@ -1,5 +1,6 @@
 package io.github.rgitha.spritz.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -36,7 +37,7 @@ private val POLL_CHOICES = listOf(0 to "Off", 15 to "Every 15 minutes", 30 to "E
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
     val context = LocalContext.current
     val store = remember { DeviceStore.get(context) }
     val settings by store.settings.collectAsState(initial = null)
@@ -88,6 +89,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                     )
                 }
             }
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("Connection log") },
+                supportingContent = { Text("Recent Bluetooth traffic, for troubleshooting") },
+                modifier = Modifier.clickable(onClick = onLog),
+            )
             HorizontalDivider()
             Section("About")
             Text(

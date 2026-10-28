@@ -19,6 +19,7 @@ import androidx.navigation.navArgument
 import io.github.rgitha.spritz.ui.AddDeviceScreen
 import io.github.rgitha.spritz.ui.DeviceListScreen
 import io.github.rgitha.spritz.ui.DeviceScreen
+import io.github.rgitha.spritz.ui.LogScreen
 import io.github.rgitha.spritz.ui.ScheduleScreen
 import io.github.rgitha.spritz.ui.SettingsScreen
 import io.github.rgitha.spritz.ui.theme.SpritzTheme
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
                             address = address,
                             onBack = { nav.popBackStack() },
                             onSchedules = { nav.navigate("schedules/$address") },
+                            onLog = { nav.navigate("log") },
                         )
                     }
                     composable(
@@ -85,7 +87,10 @@ class MainActivity : ComponentActivity() {
                             onBack = { nav.popBackStack() },
                         )
                     }
-                    composable("settings") { SettingsScreen(onBack = { nav.popBackStack() }) }
+                    composable("settings") {
+                        SettingsScreen(onBack = { nav.popBackStack() }, onLog = { nav.navigate("log") })
+                    }
+                    composable("log") { LogScreen(onBack = { nav.popBackStack() }) }
                 }
             }
         }
