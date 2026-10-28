@@ -9,10 +9,8 @@ object AerUuids {
     /** Replies arrive here as notifications. It has no CCCD. */
     val NOTIFY: UUID = nus(1)
     val COMMAND: UUID = nus(2)
-    /** Schedule uploads go here, as in the official app. */
+    /** Schedule uploads go here. */
     val SCHEDULE: UUID = nus(4)
-
-    val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     const val NAME_MATCH = "smart matic"
 

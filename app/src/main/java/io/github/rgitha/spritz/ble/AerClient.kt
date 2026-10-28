@@ -5,13 +5,10 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
 import io.github.rgitha.spritz.protocol.Cbor
 import io.github.rgitha.spritz.protocol.DeviceStatus
 import io.github.rgitha.spritz.protocol.Messages
@@ -79,7 +76,7 @@ class AerClient(context: Context, val address: String) {
         Schedule.listFrom(l.request(Messages.readSchedules(), MsgType.READ_SCHEDULES))
     }
 
-    /** Replaces every schedule on the device, as the official app does. */
+    /** Replaces every schedule on the device: remove all, wait, then upload the full list. */
     suspend fun writeSchedules(list: List<Schedule>) = run { l ->
         l.waitSinceConnect(COMMAND_DELAY_MS)
         l.request(Messages.removeSchedules(), MsgType.REMOVE_SCHEDULES).requireOk()
@@ -114,7 +111,8 @@ class AerClient(context: Context, val address: String) {
     private suspend fun <T> run(block: suspend (Link) -> T): T = opLock.withLock {
         disconnectJob?.cancel()
         try {
-            val l = link?.takeIf { it.connected } ?: connect().also { link = it }
+            if (link?.connected == false) drop() // the device went away while idle
+            val l = link ?: connect().also { link = it }
             try {
                 block(l)
             } catch (e: Exception) {
@@ -122,9 +120,29 @@ class AerClient(context: Context, val address: String) {
                 throw e
             }
         } finally {
-            disconnectJob = scope.launch {
-                delay(IDLE_DISCONNECT_MS)
-                opLock.withLock { drop() }
+            scheduleDisconnect()
+        }
+    }
+
+    /** Closes the link once no reply is pending and it has been idle for [IDLE_DISCONNECT_MS]. */
+    private fun scheduleDisconnect() {
+        disconnectJob = scope.launch {
+            while (true) {
+                val l = link ?: return@launch
+                val left = l.idleRemaining()
+                if (left > 0) {
+                    delay(left)
+                    continue
+                }
+                val done = opLock.withLock {
+                    when {
+                        link !== l -> true
+                        l.hasPending() || l.idleRemaining() > 0 -> false
+                        else -> { drop(); true }
+                    }
+                }
+                if (done) return@launch
+                delay(1000)
             }
         }
     }
@@ -160,11 +178,17 @@ class AerClient(context: Context, val address: String) {
             private set
         var timeSet = false
         private var connectedAt = 0L
+        /** Last write or notification, for the idle disconnect. */
+        @Volatile var lastActivity = 0L
+
+        fun hasPending(): Boolean = synchronized(this) { pending != null }
+
+        fun idleRemaining(): Long = lastActivity + IDLE_DISCONNECT_MS - SystemClock.elapsedRealtime()
 
         private var connectWait = CompletableDeferred<Unit>()
         private var discoverWait = CompletableDeferred<Unit>()
-        private var descriptorWait: CompletableDeferred<Unit>? = null
         private var writeWait: CompletableDeferred<Int>? = null
+        private var mtuWait: CompletableDeferred<Int?>? = null
 
         /** The single reply we're waiting for, keyed by the expected reply type. */
         private var pending: Pair<Int, CompletableDeferred<Reply>>? = null
@@ -179,17 +203,24 @@ class AerClient(context: Context, val address: String) {
             withTimeoutOrNull(DISCOVER_TIMEOUT_MS) { g.discoverServices(); discoverWait.await() }
                 ?: throw AerException("Service discovery timed out")
             val service = g.getService(AerUuids.SERVICE) ?: throw AerException("Not an aer device")
+            // Request the MTU explicitly: on Android 16 no replies arrived without this,
+            // although Android 14+ requests 517 by itself. (The Home Assistant integration
+            // went through an ESPHome Bluetooth proxy, which negotiates a larger MTU itself.)
+            // The status reply is about 99 bytes and the set-time write 35, so refuse a
+            // link that can't carry them.
+            val mtu = CompletableDeferred<Int?>().also { mtuWait = it }
+            val agreed = if (g.requestMtu(REQUESTED_MTU)) withTimeoutOrNull(1000) { mtu.await() } else null
+            BleLog.add("MTU: $agreed")
+            if (agreed != null && agreed < MIN_MTU) throw AerException("Link too small ($agreed bytes)")
             val notify = service.getCharacteristic(AerUuids.NOTIFY)
                 ?: throw AerException("Notify characteristic missing")
-            if (!g.setCharacteristicNotification(notify, true)) throw AerException("Couldn't subscribe")
-            // The aer has no CCCD here; enable through the descriptor only if one exists.
-            notify.getDescriptor(AerUuids.CCCD)?.let { d ->
-                val wait = CompletableDeferred<Unit>().also { descriptorWait = it }
-                writeDescriptor(g, d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                withTimeoutOrNull(2000) { wait.await() }
-            }
+            // 0001 has no CCCD, so register locally only; the device notifies without one.
+            val subscribed = g.setCharacteristicNotification(notify, true)
+            BleLog.add("setCharacteristicNotification ${notify.uuid}: $subscribed")
+            if (!subscribed) throw AerException("Couldn't subscribe")
             connectedAt = SystemClock.elapsedRealtime()
-            Log.d(TAG, "$address connected")
+            lastActivity = connectedAt
+            BleLog.add("$address connected")
         }
 
         suspend fun waitSinceConnect(ms: Long) {
@@ -206,13 +237,16 @@ class AerClient(context: Context, val address: String) {
             synchronized(this) { pending = expected to replyWait }
             try {
                 val written = CompletableDeferred<Int>().also { writeWait = it }
-                Log.d(TAG, "→ ${frame.toHex()}")
-                if (!writeCharacteristic(g, c, frame)) throw AerException("Write failed")
+                val rc = writeCharacteristic(g, c, frame)
+                BleLog.add("writeCharacteristic $char ${frame.toHex()} -> $rc")
+                lastActivity = SystemClock.elapsedRealtime()
+                if (rc != WRITE_STARTED) throw AerException("Write failed ($rc)")
                 val status = withTimeoutOrNull(REPLY_TIMEOUT_MS) { written.await() }
-                    ?: throw AerException("Write timed out")
+                    ?: throw AerException("Write timed out").also { BleLog.add("no onCharacteristicWrite within ${REPLY_TIMEOUT_MS}ms") }
                 if (status != BluetoothGatt.GATT_SUCCESS) throw AerException("Write failed ($status)")
                 val reply = withTimeoutOrNull(REPLY_TIMEOUT_MS) { replyWait.await() }
                     ?: throw AerException(if (connected) "No reply from the device" else "Device disconnected")
+                        .also { BleLog.add("no reply $expected within ${REPLY_TIMEOUT_MS}ms") }
                 if (reply.isRefusalOf(expected)) throw RefusedException(type)
                 return reply
             } finally {
@@ -227,10 +261,11 @@ class AerClient(context: Context, val address: String) {
                 runCatching { it.close() }
             }
             gatt = null
-            Log.d(TAG, "$address closed")
+            BleLog.add("$address closed")
         }
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            BleLog.add("onConnectionStateChange state=$newState status=$status")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 connected = true
                 connectWait.complete(Unit)
@@ -249,35 +284,44 @@ class AerClient(context: Context, val address: String) {
             else discoverWait.completeExceptionally(AerException("Service discovery failed ($status)"))
         }
 
-        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
-            descriptorWait?.complete(Unit)
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            BleLog.add("onMtuChanged mtu=$mtu status=$status")
+            mtuWait?.complete(if (status == BluetoothGatt.GATT_SUCCESS) mtu else null)
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
+            BleLog.add("onCharacteristicWrite ${c.uuid} status=$status")
             writeWait?.complete(status)
         }
 
+        /** API 33+: the value comes as a parameter, so a later notification can't overwrite it. */
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
             onData(c.uuid, value)
         }
 
+        /**
+         * API 26–32 only call this version. On 33+ it's ignored, so a reply is never
+         * handled twice.
+         */
         @Deprecated("Used before Android 13")
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 @Suppress("DEPRECATION")
-                onData(c.uuid, c.value ?: return)
+                onData(c.uuid, c.value?.copyOf() ?: return)
             }
         }
 
         /** Reassembles fragmented replies until a whole CBOR item decodes. */
         private fun onData(uuid: UUID, value: ByteArray) {
+            BleLog.add("notify $uuid ${value.toHex()}")
             val now = SystemClock.elapsedRealtime()
+            lastActivity = now
             val buf = buffers.getOrPut(uuid) { ByteArrayOutputStream() }
             if (now - (lastData[uuid] ?: now) > FRAGMENT_TIMEOUT_MS) buf.reset()
             lastData[uuid] = now
             buf.write(value)
             if (buf.size() > MAX_REPLY_BYTES) {
-                Log.w(TAG, "dropping oversized reply")
+                BleLog.add("dropping oversized reply")
                 buf.reset()
                 return
             }
@@ -287,12 +331,11 @@ class AerClient(context: Context, val address: String) {
             } catch (_: Cbor.Incomplete) {
                 return
             } catch (e: Cbor.Malformed) {
-                Log.w(TAG, "bad reply ${data.toHex()}: ${e.message}")
+                BleLog.add("bad reply ${data.toHex()}: ${e.message}")
                 buf.reset()
                 return
             }
             buf.reset()
-            Log.d(TAG, "← ${data.toHex()}")
             val reply = Reply.parse(item) ?: return
             synchronized(this) {
                 val (expected, wait) = pending ?: return
@@ -300,28 +343,28 @@ class AerClient(context: Context, val address: String) {
             }
         }
 
-        private fun writeCharacteristic(g: BluetoothGatt, c: BluetoothGattCharacteristic, v: ByteArray): Boolean {
+        /**
+         * Starts a write with response. Returns the API 33+ status code, or on older
+         * versions [WRITE_STARTED] / -1 for the boolean result.
+         */
+        private fun writeCharacteristic(g: BluetoothGatt, c: BluetoothGattCharacteristic, v: ByteArray): Int {
             val type = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                g.writeCharacteristic(c, v, type) == BluetoothStatusCodes.SUCCESS
+                g.writeCharacteristic(c, v, type)
             } else {
                 @Suppress("DEPRECATION")
-                run { c.writeType = type; c.value = v; g.writeCharacteristic(c) }
-            }
-        }
-
-        private fun writeDescriptor(g: BluetoothGatt, d: BluetoothGattDescriptor, v: ByteArray) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                g.writeDescriptor(d, v)
-            } else {
-                @Suppress("DEPRECATION")
-                run { d.value = v; g.writeDescriptor(d) }
+                val started = run { c.writeType = type; c.value = v; g.writeCharacteristic(c) }
+                if (started) WRITE_STARTED else -1
             }
         }
     }
 
     companion object {
-        private const val TAG = "AerClient"
+        /** BluetoothStatusCodes.SUCCESS; also used for a started write before API 33. */
+        private const val WRITE_STARTED = 0
+        const val REQUESTED_MTU = 185
+        /** The ~99-byte status reply plus 3 bytes of ATT overhead, with a little room. */
+        const val MIN_MTU = 104
         const val CONNECT_TIMEOUT_MS = 5_000L
         const val DISCOVER_TIMEOUT_MS = 5_000L
         const val REPLY_TIMEOUT_MS = 5_000L

@@ -9,11 +9,11 @@ import java.util.TimeZone
 
 class ProtocolTest {
 
-    @Test fun statusFrameMatchesOfficialApp() {
+    @Test fun statusFrameMatchesDeviceCapture() {
         assertEquals("bf626d54186b626d4e189dff", Messages.status().toHex())
     }
 
-    @Test fun sprayOnceFrameMatchesOfficialApp() {
+    @Test fun sprayOnceFrameMatchesDeviceCapture() {
         assertEquals("bf626d541868626d4e189a62724900ff", Messages.spray().toHex())
     }
 
