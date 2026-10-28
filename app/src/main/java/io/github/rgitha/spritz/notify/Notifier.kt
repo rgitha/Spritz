@@ -54,7 +54,7 @@ object Notifier {
         if (refill != null) {
             if (refill <= LOW_REFILL_PERCENT && !after.lowRefillNotified) {
                 if (settings.notifyLowRefill) {
-                    post(context, after, KIND_REFILL, CHANNEL_ALERTS, "Refill low: ${after.name}",
+                    post(context, after, KIND_REFILL, CHANNEL_ALERTS, "Refill low: ${after.label}",
                         "About $refill% left. Replace the cartridge, then tap Refill reset in Spritz.")
                 }
                 result = result.copy(lowRefillNotified = true)
@@ -72,7 +72,7 @@ object Notifier {
                     } else {
                         "About $battery%. Replace both AA cells soon."
                     }
-                    post(context, after, KIND_BATTERY, CHANNEL_ALERTS, "Battery low: ${after.name}", text)
+                    post(context, after, KIND_BATTERY, CHANNEL_ALERTS, "Battery low: ${after.label}", text)
                 }
                 result = result.copy(lowBatteryNotified = true)
             } else if (battery > LOW_BATTERY_PERCENT + REARM_MARGIN) {
@@ -84,7 +84,7 @@ object Notifier {
         val mode = status.mode
         if (settings.notifyScheduleStart && mode.source == ModeSource.SCHEDULE && !wasScheduled) {
             val every = mode.interval?.let { " every $it min" } ?: ""
-            post(context, after, KIND_SCHEDULE, CHANNEL_SCHEDULE, "Schedule started: ${after.name}",
+            post(context, after, KIND_SCHEDULE, CHANNEL_SCHEDULE, "Schedule started: ${after.label}",
                 "Spraying$every.")
         }
         return result

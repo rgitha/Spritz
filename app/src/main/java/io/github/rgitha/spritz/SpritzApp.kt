@@ -14,7 +14,9 @@ class SpritzApp : Application() {
         super.onCreate()
         Notifier.createChannels(this)
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
-            StatusPollWorker.schedule(this@SpritzApp, DeviceStore.get(this@SpritzApp).settingsNow().pollMinutes)
+            val store = DeviceStore.get(this@SpritzApp)
+            store.dedupeNames()
+            StatusPollWorker.schedule(this@SpritzApp, store.settingsNow().pollMinutes)
         }
     }
 }

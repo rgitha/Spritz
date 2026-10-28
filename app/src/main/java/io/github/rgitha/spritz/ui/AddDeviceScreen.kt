@@ -18,7 +18,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -28,6 +29,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +38,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -45,14 +55,19 @@ import io.github.rgitha.spritz.ble.AerScanner
 import io.github.rgitha.spritz.ble.BlePermissions
 import io.github.rgitha.spritz.ble.FoundDevice
 import io.github.rgitha.spritz.data.DeviceStore
+import io.github.rgitha.spritz.data.SpritzRepository
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddDeviceScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
+fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
     val context = LocalContext.current
     val store = remember { DeviceStore.get(context) }
+    val repo = remember { SpritzRepository.get(context) }
+    val saved by store.devices.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
 
     // Re-checked on resume, so returning from system settings updates the screen.
@@ -74,13 +89,26 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
     }
 
     var found by remember { mutableStateOf<List<FoundDevice>>(emptyList()) }
+    /** The found device being named, before it's saved. */
+    var settingUp by remember { mutableStateOf<FoundDevice?>(null) }
     var scanError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(hasPermission, btOn) {
-        if (!hasPermission || !btOn) return@LaunchedEffect
+    // The scan pauses while a device is being set up: scanning slows a connection.
+    /** Bumped by "Scan again" to start a new scan. */
+    var scanRound by remember { mutableIntStateOf(0) }
+    var scanning by remember { mutableStateOf(false) }
+    LaunchedEffect(hasPermission, btOn, settingUp == null, scanRound) {
+        if (!hasPermission || !btOn || settingUp != null) return@LaunchedEffect
         scanError = null
-        AerScanner.scan(context)
-            .catch { scanError = it.message ?: "Scan failed" }
-            .collect { found = it }
+        scanning = true
+        try {
+            withTimeoutOrNull(SCAN_MS) {
+                AerScanner.scan(context)
+                    .catch { scanError = it.message ?: "Scan failed" }
+                    .collect { found = it }
+            }
+        } finally {
+            scanning = false
+        }
     }
 
     Scaffold(
@@ -99,25 +127,32 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
                 }
 
                 else -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (scanError == null) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(48.dp)) {
+                        if (scanning) {
+                            ScanPulse()
+                        } else if (settingUp == null) {
+                            OutlinedButton(onClick = { scanRound++ }) {
+                                Icon(Icons.Default.Bluetooth, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Scan again")
+                            }
                         }
+                    }
+                    scanError?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                    // Devices already added are left out.
+                    val savedAddresses = saved.map { it.address }.toSet()
+                    val fresh = found.filter { it.address !in savedAddresses }
+                    if (found.isNotEmpty() && fresh.isEmpty()) {
                         Text(
-                            scanError ?: "Looking for devices… Keep the aer close to your phone, with its batteries in.",
+                            "No new devices found. The devices nearby are already added.",
                             style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
-                        items(found, key = { it.address }) { d ->
+                        items(fresh, key = { it.address }) { d ->
                             Card(
-                                onClick = {
-                                    scope.launch {
-                                        store.add(d.address, d.name)
-                                        onAdded(d.address)
-                                    }
-                                },
+                                onClick = { settingUp = d },
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 ListItem(
@@ -132,6 +167,53 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: (String) -> Unit) {
             }
         }
     }
+
+    // Read the chosen device's status while it's being named, once the scan has stopped.
+    LaunchedEffect(settingUp?.address) {
+        val address = settingUp?.address ?: return@LaunchedEffect
+        delay(300)
+        repo.prefetch(address)
+    }
+    settingUp?.let { d ->
+        SetupDialog(
+            address = d.address,
+            initialName = d.name,
+            initialRoom = null,
+            others = saved,
+            isNew = true,
+            onDismiss = { settingUp = null },
+            onConfirm = { name, room ->
+                settingUp = null
+                scope.launch {
+                    store.add(d.address, name, room)
+                    repo.adopt(d.address)
+                    store.updateSettings { it.copy(lastDevice = d.address) }
+                    onAdded()
+                }
+            },
+        )
+    }
+}
+
+/** A scan lasts this long; then "Scan again" appears. Android also limits how often scans start. */
+private const val SCAN_MS = 30_000L
+
+/** A slowly pulsing Bluetooth icon: listening, not something to wait for. */
+@Composable
+private fun ScanPulse() {
+    val pulse = rememberInfiniteTransition(label = "scan")
+    val alpha by pulse.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse),
+        label = "alpha",
+    )
+    Icon(
+        Icons.Default.Bluetooth,
+        contentDescription = "Scanning",
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.size(28.dp).alpha(alpha),
+    )
 }
 
 private fun signal(rssi: Int) = when {

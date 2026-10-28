@@ -39,7 +39,7 @@ class SprayWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val store = DeviceStore.get(context)
-        val name = store.widgetDevice()?.name
+        val name = store.widgetDevice()?.label
         val state = store.widgetState.first()
         provideContent {
             GlanceTheme { Content(name, state) }

@@ -37,7 +37,6 @@ object AerScanner {
         }
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         scanner.startScan(null, settings, callback)
-        trySend(emptyList())
         awaitClose { runCatching { scanner.stopScan(callback) } }
     }
 }

@@ -19,7 +19,11 @@ import org.json.JSONObject
 /** A device the user added, with what we last learned about it. */
 data class SavedDevice(
     val address: String,
+    /** The base name the user typed; see [displayName]. */
     val name: String,
+    /** Number added to a name that's already taken; see [Naming]. */
+    val suffix: Int? = null,
+    val room: String? = null,
     val status: DeviceStatus? = null,
     /** When [status] was read, in epoch millis. */
     val statusAt: Long = 0,
@@ -29,6 +33,12 @@ data class SavedDevice(
     val lowBatteryNotified: Boolean = false,
 ) {
     val refillPercent: Int? get() = status?.let { Refill.percent(it.totalSprays, refillBaseline) }
+
+    /** The unique name, with its suffix. */
+    val displayName: String get() = Naming.display(name, suffix)
+
+    /** The room and name, for notifications and the widget. */
+    val label: String get() = room?.let { "$it · $displayName" } ?: displayName
 }
 
 data class Settings(
@@ -39,6 +49,8 @@ data class Settings(
     val notifyScheduleStart: Boolean = true,
     /** The device the widget sprays; null means the first one. */
     val widgetDevice: String? = null,
+    /** The device shown when the app opens. */
+    val lastDevice: String? = null,
 )
 
 /** The widget's last result, shown under its button. */
@@ -58,6 +70,7 @@ class DeviceStore(context: Context) {
             notifyLowBattery = it[N_BATTERY] ?: true,
             notifyScheduleStart = it[N_SCHEDULE] ?: true,
             widgetDevice = it[WIDGET_DEVICE],
+            lastDevice = it[LAST_DEVICE],
         )
     }
 
@@ -78,13 +91,24 @@ class DeviceStore(context: Context) {
         return list.find { it.address == chosen } ?: list.firstOrNull()
     }
 
-    suspend fun add(address: String, name: String) = updateDevices { list ->
-        if (list.any { it.address == address }) list else list + SavedDevice(address, name)
+    suspend fun add(address: String, name: String, room: String?) = updateDevices { list ->
+        if (list.any { it.address == address }) list
+        else list + SavedDevice(address, name, Naming.suffixFor(name, list), room)
     }
 
     suspend fun remove(address: String) = updateDevices { list -> list.filter { it.address != address } }
 
-    suspend fun rename(address: String, name: String) = update(address) { it.copy(name = name) }
+    /** Renames and moves a device; its suffix is worked out again against the others. */
+    suspend fun edit(address: String, name: String, room: String?) = updateDevices { list ->
+        val others = list.filter { it.address != address }
+        list.map {
+            if (it.address != address) it
+            else it.copy(name = name, suffix = Naming.suffixFor(name, others), room = room)
+        }
+    }
+
+    /** Gives suffixes to names saved before they were made unique. Safe to repeat. */
+    suspend fun dedupeNames() = updateDevices { Naming.dedupe(it) }
 
     suspend fun update(address: String, change: (SavedDevice) -> SavedDevice) = updateDevices { list ->
         list.map { if (it.address == address) change(it) else it }
@@ -98,6 +122,7 @@ class DeviceStore(context: Context) {
             it[N_BATTERY] = s.notifyLowBattery
             it[N_SCHEDULE] = s.notifyScheduleStart
             if (s.widgetDevice == null) it.remove(WIDGET_DEVICE) else it[WIDGET_DEVICE] = s.widgetDevice
+            if (s.lastDevice == null) it.remove(LAST_DEVICE) else it[LAST_DEVICE] = s.lastDevice
         }
     }
 
@@ -115,6 +140,7 @@ class DeviceStore(context: Context) {
 
     private fun settingsFrom(p: Preferences) = Settings(
         p[POLL] ?: 60, p[N_REFILL] ?: true, p[N_BATTERY] ?: true, p[N_SCHEDULE] ?: true, p[WIDGET_DEVICE],
+        p[LAST_DEVICE],
     )
 
     companion object {
@@ -124,6 +150,7 @@ class DeviceStore(context: Context) {
         private val N_BATTERY = booleanPreferencesKey("notify_battery")
         private val N_SCHEDULE = booleanPreferencesKey("notify_schedule")
         private val WIDGET_DEVICE = stringPreferencesKey("widget_device")
+        private val LAST_DEVICE = stringPreferencesKey("last_device")
         private val W_TEXT = stringPreferencesKey("widget_text")
         private val W_AT = stringPreferencesKey("widget_at")
         private val W_BUSY = booleanPreferencesKey("widget_busy")
@@ -138,6 +165,8 @@ class DeviceStore(context: Context) {
                 put(JSONObject().apply {
                     put("address", d.address)
                     put("name", d.name)
+                    d.suffix?.let { put("suffix", it) }
+                    d.room?.let { put("room", it) }
                     put("statusAt", d.statusAt)
                     put("refillBaseline", d.refillBaseline)
                     put("lowRefillNotified", d.lowRefillNotified)
@@ -155,6 +184,8 @@ class DeviceStore(context: Context) {
                 SavedDevice(
                     address = o.getString("address"),
                     name = o.getString("name"),
+                    suffix = if (o.has("suffix")) o.getInt("suffix") else null,
+                    room = o.optString("room").ifEmpty { null },
                     status = o.optJSONObject("status")?.let(::decodeStatus),
                     statusAt = o.optLong("statusAt"),
                     refillBaseline = o.optLong("refillBaseline"),

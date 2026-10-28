@@ -30,7 +30,7 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -38,15 +38,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -64,10 +61,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.rgitha.spritz.data.SpritzRepository
 import io.github.rgitha.spritz.protocol.INTERVALS
 import io.github.rgitha.spritz.protocol.Schedule
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.launch
 import java.time.DayOfWeek
 import java.time.format.TextStyle
 import java.util.Locale
@@ -79,14 +73,22 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
     val schedules = MutableStateFlow<List<Schedule>?>(null)
     /** True when [schedules] differs from what's on the device. */
     val dirty = MutableStateFlow(false)
-    val busy = MutableStateFlow<String?>(null)
-    val messages = Channel<String>(Channel.BUFFERED)
+    val loading = MutableStateFlow(false)
+    val commands = Commands(viewModelScope, app)
 
     init { load() }
 
-    fun load() = op("Reading schedules…") {
-        schedules.value = repo.readSchedules(address)
-        dirty.value = false
+    fun load() {
+        if (loading.value) return
+        loading.value = true
+        commands.quiet {
+            try {
+                schedules.value = repo.readSchedules(address)
+                dirty.value = false
+            } finally {
+                loading.value = false
+            }
+        }
     }
 
     fun put(index: Int?, s: Schedule) {
@@ -105,10 +107,10 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
         val list = schedules.value ?: return
         val problems = list.flatMap { it.problems() } + Schedule.listProblems(list)
         if (problems.isNotEmpty()) {
-            viewModelScope.launch { messages.send(problems.first()) }
+            commands.toast(problems.first())
             return
         }
-        op("Saving to the device…", done = "Schedules saved") {
+        commands.run(KEY_SAVE) {
             repo.writeSchedules(address, list)
             schedules.value = repo.readSchedules(address)
             dirty.value = false
@@ -116,17 +118,11 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
     }
 
     /** Skips the rest of today's run of the schedule at [index], as stored on the device. */
-    fun skipToday(index: Int) = op("Stopping…", done = "Skipped for today") { repo.stopRun(address, index) }
+    fun skipToday(index: Int) = commands.run(skipKey(index)) { repo.stopRun(address, index) }
 
-    private fun op(label: String, done: String? = null, block: suspend () -> Unit) {
-        if (busy.value != null) return
-        busy.value = label
-        viewModelScope.launch {
-            runCatching { block() }
-                .onSuccess { done?.let { messages.send(it) } }
-                .onFailure { messages.send(it.userMessage()) }
-            busy.value = null
-        }
+    companion object {
+        const val KEY_SAVE = "save"
+        fun skipKey(index: Int) = "skip:$index"
     }
 }
 
@@ -137,9 +133,9 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
     val vm: ScheduleViewModel = viewModel(key = "schedules-$address") { ScheduleViewModel(app, address) }
     val list by vm.schedules.collectAsState()
     val dirty by vm.dirty.collectAsState()
-    val busy by vm.busy.collectAsState()
-    val snackbar = remember { SnackbarHostState() }
-    LaunchedEffect(vm) { vm.messages.receiveAsFlow().collect { snackbar.showSnackbar(it) } }
+    val loading by vm.loading.collectAsState()
+    val outcomes by vm.commands.outcomes.collectAsState()
+    val saving = outcomes[ScheduleViewModel.KEY_SAVE] == Outcome.RUNNING
 
     /** null: closed; -1: new schedule; otherwise the index being edited. */
     var editing by remember { mutableStateOf<Int?>(null) }
@@ -154,7 +150,14 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
                 title = { Text("Schedules") },
                 navigationIcon = { BackButton(back) },
                 actions = {
-                    TextButton(onClick = vm::save, enabled = dirty && busy == null) { Text("Save") }
+                    val saveOutcome = outcomes[ScheduleViewModel.KEY_SAVE]
+                    TextButton(onClick = vm::save, enabled = dirty || saveOutcome != null) {
+                        Text("Save")
+                        if (saveOutcome != null) {
+                            Spacer(Modifier.width(8.dp))
+                            OutcomeMark(saveOutcome)
+                        }
+                    }
                 },
             )
         },
@@ -167,22 +170,19 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
                 )
             }
         },
-        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(Modifier.padding(padding)) {
-            if (busy != null) {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text(busy!!, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp, 4.dp))
-            }
             val l = list
             when {
-                l == null && busy == null -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                l == null && loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+                l == null -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = gap) {
                         Text("Couldn't read the schedules.")
                         Button(onClick = vm::load) { Text("Try again") }
                     }
                 }
-                l == null -> Unit
                 l.isEmpty() -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                     Text(
                         "No schedules. Add one to spray on set days and times; all schedules run together.",
@@ -205,7 +205,8 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
                     itemsIndexed(l) { i, s ->
                         ScheduleItem(
                             s,
-                            canSkip = !dirty && busy == null,
+                            outcome = outcomes[ScheduleViewModel.skipKey(i)],
+                            canSkip = !dirty && !saving,
                             onEdit = { editing = i },
                             onDelete = { vm.delete(i) },
                             onSkip = { vm.skipToday(i) },
@@ -237,23 +238,33 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun ScheduleItem(s: Schedule, canSkip: Boolean, onEdit: () -> Unit, onDelete: () -> Unit, onSkip: () -> Unit) {
+private fun ScheduleItem(
+    s: Schedule,
+    outcome: Outcome?,
+    canSkip: Boolean,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onSkip: () -> Unit,
+) {
     var menu by remember { mutableStateOf(false) }
     Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
         ListItem(
             headlineContent = { Text(daysLabel(s.dayMask)) },
             supportingContent = { Text(s.summary()) },
             trailingContent = {
-                Box {
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; onEdit() })
-                        DropdownMenuItem(
-                            text = { Text("Skip today's run") },
-                            enabled = canSkip,
-                            onClick = { menu = false; onSkip() },
-                        )
-                        DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutcomeMark(outcome)
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; onEdit() })
+                            DropdownMenuItem(
+                                text = { Text("Skip today's run") },
+                                enabled = canSkip,
+                                onClick = { menu = false; onSkip() },
+                            )
+                            DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
+                        }
                     }
                 }
             },

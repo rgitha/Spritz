@@ -78,7 +78,7 @@ fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
                 val chosen = devices.find { it.address == s.widgetDevice } ?: devices.first()
                 devices.forEach { d ->
                     ListItem(
-                        headlineContent = { Text(d.name) },
+                        headlineContent = { Text(d.label) },
                         leadingContent = { RadioButton(selected = d.address == chosen.address, onClick = null) },
                         modifier = Modifier.selectable(selected = d.address == chosen.address) {
                             scope.launch {

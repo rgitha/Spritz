@@ -16,9 +16,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import io.github.rgitha.spritz.data.DeviceStore
 import io.github.rgitha.spritz.ui.AddDeviceScreen
-import io.github.rgitha.spritz.ui.DeviceListScreen
-import io.github.rgitha.spritz.ui.DeviceScreen
+import io.github.rgitha.spritz.ui.HomeScreen
 import io.github.rgitha.spritz.ui.LogScreen
 import io.github.rgitha.spritz.ui.ScheduleScreen
 import io.github.rgitha.spritz.ui.SettingsScreen
@@ -45,37 +45,25 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 LaunchedEffect(openDevice.value) {
-                    openDevice.value?.let {
-                        nav.navigate("device/$it") { launchSingleTop = true }
+                    openDevice.value?.let { address ->
+                        DeviceStore.get(this@MainActivity).updateSettings { it.copy(lastDevice = address) }
+                        nav.popBackStack("home", inclusive = false)
                         openDevice.value = null
                     }
                 }
-                NavHost(nav, startDestination = "devices") {
-                    composable("devices") {
-                        DeviceListScreen(
-                            onOpen = { nav.navigate("device/$it") },
+                NavHost(nav, startDestination = "home") {
+                    composable("home") {
+                        HomeScreen(
                             onAdd = { nav.navigate("add") },
+                            onSchedules = { nav.navigate("schedules/$it") },
                             onSettings = { nav.navigate("settings") },
+                            onLog = { nav.navigate("log") },
                         )
                     }
                     composable("add") {
                         AddDeviceScreen(
                             onBack = { nav.popBackStack() },
-                            onAdded = { address ->
-                                nav.navigate("device/$address") { popUpTo("devices") }
-                            },
-                        )
-                    }
-                    composable(
-                        "device/{address}",
-                        arguments = listOf(navArgument("address") { type = NavType.StringType }),
-                    ) { entry ->
-                        val address = entry.arguments!!.getString("address")!!
-                        DeviceScreen(
-                            address = address,
-                            onBack = { nav.popBackStack() },
-                            onSchedules = { nav.navigate("schedules/$address") },
-                            onLog = { nav.navigate("log") },
+                            onAdded = { nav.popBackStack("home", inclusive = false) },
                         )
                     }
                     composable(
