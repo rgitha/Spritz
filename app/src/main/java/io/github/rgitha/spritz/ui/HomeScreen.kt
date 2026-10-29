@@ -49,7 +49,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -259,10 +258,41 @@ fun DeviceName(d: SavedDevice, style: TextStyle, modifier: Modifier = Modifier) 
     }
 }
 
-private fun SavedDevice.statusLine(): String {
-    val s = status ?: return "Not read yet"
-    val battery = s.batteryPercent?.let { "Battery $it%" } ?: "Battery –"
-    return "$battery · Refill $refillPercent% · ${s.mode.shortLabel}"
+/** The mode, then battery and refill as icons, each in a fixed width so rows line up. */
+@Composable
+private fun StatusLine(d: SavedDevice) {
+    val s = d.status
+    val style = MaterialTheme.typography.bodySmall
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    if (s == null) {
+        Text("Not read yet", style = style, color = muted)
+        return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(s.mode.shortLabel, style = style, color = muted, modifier = Modifier.width(72.dp))
+        val battery = if (d.batteryLow) MaterialTheme.colorScheme.error else muted
+        Row(Modifier.width(56.dp), verticalAlignment = Alignment.CenterVertically) {
+            BatteryIcon(
+                s.batteryPercent,
+                if (d.batteryLow) battery else MaterialTheme.colorScheme.primary,
+                Modifier.size(9.dp, 15.dp),
+                outline = battery,
+                stroke = 4f,
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(s.batteryPercent?.let { "$it%" } ?: "–", style = style, color = battery)
+        }
+        val refill = if (d.refillLow) MaterialTheme.colorScheme.error else muted
+        RefillIcon(
+            d.refillPercent,
+            if (d.refillLow) refill else MaterialTheme.colorScheme.primary,
+            Modifier.size(11.dp, 15.dp),
+            outline = refill,
+            stroke = 3.5f,
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(d.refillPercent?.let { "$it%" } ?: "–", style = style, color = refill)
+    }
 }
 
 /** The switcher's content: devices grouped by room, each with Spray, then Add device. */
@@ -310,17 +340,8 @@ private fun Switcher(
                             )
                         }
                     }
-                    Text(
-                        d.address,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        d.statusLine(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Spacer(Modifier.height(2.dp))
+                    StatusLine(d)
                 }
                 Spacer(Modifier.width(8.dp))
                 FilledTonalButton(onClick = { onSpray(d.address) }) {

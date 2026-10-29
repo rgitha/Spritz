@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,14 +13,22 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -39,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -88,12 +96,16 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
         recheck++
     }
 
+    // Kept across searches, so a device doesn't vanish when a new search starts.
     var found by remember { mutableStateOf<List<FoundDevice>>(emptyList()) }
+    /** Added on this visit, shown highlighted. */
+    var justAdded by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val snackbar = remember { SnackbarHostState() }
     /** The found device being named, before it's saved. */
     var settingUp by remember { mutableStateOf<FoundDevice?>(null) }
     var scanError by remember { mutableStateOf<String?>(null) }
-    // The scan pauses while a device is being set up: scanning slows a connection.
-    /** Bumped by "Scan again" to start a new scan. */
+    // The search pauses while a device is being set up: searching slows a connection.
+    /** Bumped by "Search again" to start a new search. */
     var scanRound by remember { mutableIntStateOf(0) }
     var scanning by remember { mutableStateOf(false) }
     LaunchedEffect(hasPermission, btOn, settingUp == null, scanRound) {
@@ -103,8 +115,11 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
         try {
             withTimeoutOrNull(SCAN_MS) {
                 AerScanner.scan(context)
-                    .catch { scanError = it.message ?: "Scan failed" }
-                    .collect { found = it }
+                    .catch { scanError = it.message ?: "Search failed" }
+                    .collect { seen ->
+                        val fresh = seen.associateBy { it.address }
+                        found = found.map { fresh[it.address] ?: it } + seen.filter { s -> found.none { it.address == s.address } }
+                    }
             }
         } finally {
             scanning = false
@@ -113,8 +128,12 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Add device") }, navigationIcon = { BackButton(onBack) }) },
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
-        Column(Modifier.padding(padding).padding(horizontal = 16.dp), verticalArrangement = gap) {
+        Column(
+            Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            verticalArrangement = gap,
+        ) {
             when {
                 !hasPermission -> Prompt(
                     "Spritz needs Bluetooth permission to find your aer device." +
@@ -127,39 +146,25 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
                 }
 
                 else -> {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(48.dp)) {
-                        if (scanning) {
-                            ScanPulse()
-                        } else if (settingUp == null) {
-                            OutlinedButton(onClick = { scanRound++ }) {
-                                Icon(Icons.Default.Bluetooth, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Scan again")
-                            }
-                        }
-                    }
+                    SearchCard(searching = scanning || settingUp != null, onSearch = { scanRound++ })
                     scanError?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
-                    // Devices already added are left out.
-                    val savedAddresses = saved.map { it.address }.toSet()
-                    val fresh = found.filter { it.address !in savedAddresses }
-                    if (found.isNotEmpty() && fresh.isEmpty()) {
+                    if (found.isNotEmpty()) {
                         Text(
-                            "No new devices found. The devices nearby are already added.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            "Found",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 4.dp, top = 8.dp),
                         )
-                    }
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
-                        items(fresh, key = { it.address }) { d ->
-                            Card(
-                                onClick = { settingUp = d },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                ListItem(
-                                    headlineContent = { Text(d.name) },
-                                    supportingContent = { Text("${d.address} · signal ${signal(d.rssi)}") },
-                                    trailingContent = { Text("Add", color = MaterialTheme.colorScheme.primary) },
-                                )
+                        // Devices already added stay listed, so each unit can be told apart.
+                        Card(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                            found.forEachIndexed { i, d ->
+                                if (i > 0) HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                                val added = saved.find { it.address == d.address }
+                                if (added == null) {
+                                    FoundRow(d, onAdd = { settingUp = d })
+                                } else {
+                                    AddedRow(d, added.label, highlight = d.address in justAdded)
+                                }
                             }
                         }
                     }
@@ -186,20 +191,74 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
                     store.add(d.address, name, room)
                     repo.adopt(d.address)
                     store.updateSettings { it.copy(lastDevice = d.address) }
-                    onAdded()
+                    // Stay while there are more to add; the search starts again by itself.
+                    val savedNow = store.devicesNow().map { it.address }.toSet()
+                    if (found.all { it.address in savedNow }) {
+                        onAdded()
+                        return@launch
+                    }
+                    justAdded = justAdded + d.address
+                    val label = store.devicesNow().find { it.address == d.address }?.label ?: name
+                    val result = snackbar.showSnackbar("Added $label", actionLabel = "Open", duration = SnackbarDuration.Long)
+                    if (result == SnackbarResult.ActionPerformed) {
+                        store.updateSettings { it.copy(lastDevice = d.address) }
+                        onAdded()
+                    }
                 }
             },
         )
     }
 }
 
-/** A scan lasts this long; then "Scan again" appears. Android also limits how often scans start. */
+/** A search lasts this long; then "Search again" appears. Android also limits how often searches start. */
 private const val SCAN_MS = 30_000L
+
+/** What the search is doing, with a tip; after it stops, a way to start it again. */
+@Composable
+private fun SearchCard(searching: Boolean, onSearch: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.size(40.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
+                ) {
+                    if (searching) {
+                        SearchPulse()
+                    } else {
+                        Icon(
+                            Icons.Default.Bluetooth,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(16.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(if (searching) "Searching nearby…" else "Search stopped", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (searching) {
+                            "Keep the device within a few metres. Press its button to wake it."
+                        } else {
+                            "Not seeing it? Make sure it's nearby, then search again."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (!searching) {
+                Button(onClick = onSearch, modifier = Modifier.align(Alignment.End)) { Text("Search again") }
+            }
+        }
+    }
+}
 
 /** A slowly pulsing Bluetooth icon: listening, not something to wait for. */
 @Composable
-private fun ScanPulse() {
-    val pulse = rememberInfiniteTransition(label = "scan")
+private fun SearchPulse() {
+    val pulse = rememberInfiniteTransition(label = "search")
     val alpha by pulse.animateFloat(
         initialValue = 0.25f,
         targetValue = 1f,
@@ -208,10 +267,53 @@ private fun ScanPulse() {
     )
     Icon(
         Icons.Default.Bluetooth,
-        contentDescription = "Scanning",
+        contentDescription = "Searching",
         tint = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.size(28.dp).alpha(alpha),
+        modifier = Modifier.size(22.dp).alpha(alpha),
     )
+}
+
+@Composable
+private fun FoundRow(d: FoundDevice, onAdd: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onAdd).padding(start = 16.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(d.name, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "${d.address} · ${signal(d.rssi)} signal",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        OutlinedButton(onClick = onAdd) { Text("Add") }
+    }
+}
+
+/** A device already added: its room and name instead of the signal. [highlight] marks one added just now. */
+@Composable
+private fun AddedRow(d: FoundDevice, label: String, highlight: Boolean) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (highlight) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else Color.Transparent)
+            .padding(16.dp),
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(d.name, style = MaterialTheme.typography.bodyLarge, color = muted)
+            Text("${d.address} · $label", style = MaterialTheme.typography.bodySmall, color = muted)
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            "Added",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (highlight) MaterialTheme.colorScheme.primary else muted,
+        )
+    }
 }
 
 private fun signal(rssi: Int) = when {

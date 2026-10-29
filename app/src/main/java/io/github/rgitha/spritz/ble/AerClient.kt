@@ -15,7 +15,7 @@ import io.github.rgitha.spritz.protocol.Messages
 import io.github.rgitha.spritz.protocol.MsgType
 import io.github.rgitha.spritz.protocol.Reply
 import io.github.rgitha.spritz.protocol.Schedule
-import io.github.rgitha.spritz.protocol.toHex
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +30,10 @@ import java.io.ByteArrayOutputStream
 import java.util.TimeZone
 import java.util.UUID
 
-class AerException(message: String) : Exception(message)
+class AerException(message: String, val kind: Kind = Kind.OTHER) : Exception(message) {
+    /** Broad causes, for places too small for the full message (the widget). */
+    enum class Kind { NOT_IN_RANGE, BLUETOOTH_OFF, NO_PERMISSION, NO_REPLY, OTHER }
+}
 
 /** The device answered with ack 100. */
 class RefusedException(request: Int) : Exception("The device refused request $request")
@@ -62,36 +65,39 @@ class AerClient(context: Context, val address: String) {
     }
 
     /** Sprays once ([interval] 0) or starts auto mode, then reads the status back. */
-    suspend fun spray(interval: Int = 0): DeviceStatus =
-        command(Messages.spray(interval), MsgType.SPRAY)
+    suspend fun spray(interval: Int = 0): DeviceStatus = command(
+        Messages.spray(interval), MsgType.SPRAY,
+        if (interval == 0) "Spray" else "Start auto, every $interval min",
+    )
 
-    suspend fun stopAuto(): DeviceStatus = command(Messages.stopAuto(), MsgType.STOP)
+    suspend fun stopAuto(): DeviceStatus = command(Messages.stopAuto(), MsgType.STOP, "Stop auto")
 
-    suspend fun stopRun(run: Int): DeviceStatus = command(Messages.stopRun(run), MsgType.STOP)
+    suspend fun stopRun(run: Int): DeviceStatus = command(Messages.stopRun(run), MsgType.STOP, "Skip scheduled run")
 
-    suspend fun refillReset(): DeviceStatus = command(Messages.refillReset(), MsgType.REFILL_RESET)
+    suspend fun refillReset(): DeviceStatus = command(Messages.refillReset(), MsgType.REFILL_RESET, "Reset spray count")
 
     suspend fun readSchedules(): List<Schedule> = run { l ->
         l.waitSinceConnect(COMMAND_DELAY_MS)
-        Schedule.listFrom(l.request(Messages.readSchedules(), MsgType.READ_SCHEDULES))
+        Schedule.listFrom(l.request(Messages.readSchedules(), MsgType.READ_SCHEDULES, "Read schedules"))
     }
 
     /** Replaces every schedule on the device: remove all, wait, then upload the full list. */
     suspend fun writeSchedules(list: List<Schedule>) = run { l ->
         l.waitSinceConnect(COMMAND_DELAY_MS)
-        l.request(Messages.removeSchedules(), MsgType.REMOVE_SCHEDULES).requireOk()
+        l.request(Messages.removeSchedules(), MsgType.REMOVE_SCHEDULES, "Clear schedules").requireOk()
         if (list.isEmpty()) return@run
         delay(SCHEDULE_UPLOAD_GAP_MS)
-        l.request(Messages.setSchedules(list), MsgType.SET_SCHEDULES, AerUuids.SCHEDULE).requireOk()
+        l.request(Messages.setSchedules(list), MsgType.SET_SCHEDULES, "Upload ${list.size} schedules", AerUuids.SCHEDULE)
+            .requireOk()
     }
 
     fun close() {
         scope.launch { opLock.withLock { drop() } }
     }
 
-    private suspend fun command(frame: ByteArray, type: Int): DeviceStatus = run { l ->
+    private suspend fun command(frame: ByteArray, type: Int, what: String): DeviceStatus = run { l ->
         l.waitSinceConnect(COMMAND_DELAY_MS)
-        l.request(frame, type).requireOk()
+        l.request(frame, type, what).requireOk()
         if (!l.timeSet) setTime(l)
         delay(500)
         status(l)
@@ -100,13 +106,17 @@ class AerClient(context: Context, val address: String) {
     private suspend fun setTime(l: Link) {
         // Best effort: a missing clock ack shouldn't fail the caller's operation.
         val ok = runCatching {
-            l.request(Messages.setTime(System.currentTimeMillis(), TimeZone.getDefault()), MsgType.SET_TIME)
+            l.request(Messages.setTime(System.currentTimeMillis(), TimeZone.getDefault()), MsgType.SET_TIME, "Set clock")
         }.isSuccess
         l.timeSet = ok
     }
 
-    private suspend fun status(l: Link) =
-        DeviceStatus.from(l.request(Messages.status(), MsgType.STATUS))
+    private suspend fun status(l: Link): DeviceStatus {
+        val s = DeviceStatus.from(l.request(Messages.status(), MsgType.STATUS, "Read status", logDone = false))
+        val battery = s.batteryPercent?.let { "battery $it%" } ?: "battery unknown"
+        BleLog.add(address, "✓ Status: ${s.mode.shortLabel}, $battery, ${s.totalSprays} sprays counted")
+        return s
+    }
 
     private suspend fun <T> run(block: suspend (Link) -> T): T = opLock.withLock {
         disconnectJob?.cancel()
@@ -119,8 +129,26 @@ class AerClient(context: Context, val address: String) {
                 if (!l.connected) drop()
                 throw e
             }
+        } catch (e: Exception) {
+            throw translate(e)
         } finally {
             scheduleDisconnect()
+        }
+    }
+
+    /**
+     * Turns a system error from a Bluetooth call (such as DeadObjectException while
+     * Bluetooth is being switched off) into one with a message for people.
+     */
+    private fun translate(e: Exception): Exception = when (e) {
+        is CancellationException, is AerException, is RefusedException, is SecurityException -> e
+        else -> {
+            drop() // the link can't be trusted after this
+            if (BlePermissions.adapter(context)?.isEnabled != true) {
+                AerException("Bluetooth is off", AerException.Kind.BLUETOOTH_OFF)
+            } else {
+                AerException("Bluetooth stopped responding. Try again.")
+            }
         }
     }
 
@@ -153,14 +181,21 @@ class AerClient(context: Context, val address: String) {
     }
 
     private suspend fun connect(): Link {
-        if (!BlePermissions.canConnect(context)) throw AerException("Bluetooth permission not granted")
-        val adapter = BlePermissions.adapter(context) ?: throw AerException("No Bluetooth adapter")
-        if (!adapter.isEnabled) throw AerException("Bluetooth is off")
+        if (!BlePermissions.canConnect(context)) {
+            BleLog.add(address, "✗ Can't connect: Bluetooth permission not granted")
+            throw AerException("Bluetooth permission not granted", AerException.Kind.NO_PERMISSION)
+        }
+        val adapter = BlePermissions.adapter(context)
+        if (adapter == null || !adapter.isEnabled) {
+            BleLog.add(address, "✗ Can't connect: Bluetooth is off")
+            throw AerException("Bluetooth is off", AerException.Kind.BLUETOOTH_OFF)
+        }
         val l = Link(adapter.getRemoteDevice(address))
         try {
             l.open()
         } catch (e: Exception) {
-            l.close()
+            BleLog.add(address, "✗ Couldn't connect: ${(e as? AerException)?.message ?: "Bluetooth error"}")
+            l.close(log = false)
             throw e
         }
         return l
@@ -196,10 +231,11 @@ class AerClient(context: Context, val address: String) {
         private val lastData = HashMap<UUID, Long>()
 
         suspend fun open() {
+            BleLog.add(address, "Connecting")
             val g = device.connectGatt(context, false, this, BluetoothDevice.TRANSPORT_LE)
             gatt = g ?: throw AerException("Couldn't start a connection")
             withTimeoutOrNull(CONNECT_TIMEOUT_MS) { connectWait.await() }
-                ?: throw AerException("Device didn't respond. Is it nearby and switched on?")
+                ?: throw AerException("Device didn't respond. Is it nearby and switched on?", AerException.Kind.NOT_IN_RANGE)
             withTimeoutOrNull(DISCOVER_TIMEOUT_MS) { g.discoverServices(); discoverWait.await() }
                 ?: throw AerException("Service discovery timed out")
             val service = g.getService(AerUuids.SERVICE) ?: throw AerException("Not an aer device")
@@ -210,17 +246,14 @@ class AerClient(context: Context, val address: String) {
             // link that can't carry them.
             val mtu = CompletableDeferred<Int?>().also { mtuWait = it }
             val agreed = if (g.requestMtu(REQUESTED_MTU)) withTimeoutOrNull(1000) { mtu.await() } else null
-            BleLog.add(address, "MTU: $agreed")
             if (agreed != null && agreed < MIN_MTU) throw AerException("Link too small ($agreed bytes)")
             val notify = service.getCharacteristic(AerUuids.NOTIFY)
                 ?: throw AerException("Notify characteristic missing")
             // 0001 has no CCCD, so register locally only; the device notifies without one.
-            val subscribed = g.setCharacteristicNotification(notify, true)
-            BleLog.add(address, "setCharacteristicNotification ${notify.uuid}: $subscribed")
-            if (!subscribed) throw AerException("Couldn't subscribe")
+            if (!g.setCharacteristicNotification(notify, true)) throw AerException("Couldn't subscribe")
             connectedAt = SystemClock.elapsedRealtime()
             lastActivity = connectedAt
-            BleLog.add(address, "connected")
+            BleLog.add(address, "Connected")
         }
 
         suspend fun waitSinceConnect(ms: Long) {
@@ -228,7 +261,17 @@ class AerClient(context: Context, val address: String) {
             if (left > 0) delay(left)
         }
 
-        suspend fun request(frame: ByteArray, type: Int, char: UUID = AerUuids.COMMAND): Reply {
+        /**
+         * Sends [frame] and waits for its reply. [what] says what it is in the log; with
+         * [logDone] false the caller logs the outcome itself.
+         */
+        suspend fun request(
+            frame: ByteArray,
+            type: Int,
+            what: String,
+            char: UUID = AerUuids.COMMAND,
+            logDone: Boolean = true,
+        ): Reply {
             val g = gatt ?: throw AerException("Not connected")
             val c = g.getService(AerUuids.SERVICE)?.getCharacteristic(char)
                 ?: throw AerException("Characteristic $char missing")
@@ -237,41 +280,61 @@ class AerClient(context: Context, val address: String) {
             synchronized(this) { pending = expected to replyWait }
             try {
                 val written = CompletableDeferred<Int>().also { writeWait = it }
+                BleLog.add(address, "→ $what")
                 val rc = writeCharacteristic(g, c, frame)
-                BleLog.add(address, "writeCharacteristic $char ${frame.toHex()} -> $rc")
                 lastActivity = SystemClock.elapsedRealtime()
-                if (rc != WRITE_STARTED) throw AerException("Write failed ($rc)")
+                if (rc != WRITE_STARTED) {
+                    BleLog.add(address, "✗ $what: couldn't send")
+                    throw AerException("Write failed ($rc)")
+                }
                 val status = withTimeoutOrNull(REPLY_TIMEOUT_MS) { written.await() }
-                    ?: throw AerException("Write timed out").also { BleLog.add(address, "no onCharacteristicWrite within ${REPLY_TIMEOUT_MS}ms") }
-                if (status != BluetoothGatt.GATT_SUCCESS) throw AerException("Write failed ($status)")
+                if (status == null) {
+                    BleLog.add(address, "✗ $what: not delivered")
+                    throw AerException("Write timed out", AerException.Kind.NO_REPLY)
+                }
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    BleLog.add(address, "✗ $what: couldn't send")
+                    throw AerException("Write failed ($status)")
+                }
                 val reply = withTimeoutOrNull(REPLY_TIMEOUT_MS) { replyWait.await() }
-                    ?: throw AerException(if (connected) "No reply from the device" else "Device disconnected")
-                        .also { BleLog.add(address, "no reply $expected within ${REPLY_TIMEOUT_MS}ms") }
-                if (reply.isRefusalOf(expected)) throw RefusedException(type)
+                if (reply == null) {
+                    BleLog.add(address, "✗ $what: no reply in ${REPLY_TIMEOUT_MS / 1000} s")
+                    throw AerException(
+                        if (connected) "No reply from the device" else "Device disconnected",
+                        AerException.Kind.NO_REPLY,
+                    )
+                }
+                if (reply.isRefusalOf(expected)) {
+                    BleLog.add(address, "✗ $what: refused by the device")
+                    throw RefusedException(type)
+                }
+                if (logDone) {
+                    BleLog.add(address, if (reply.ack == null || reply.ack == MsgType.ACK_OK) "✓ $what" else "✗ $what: ack ${reply.ack}")
+                }
                 return reply
             } finally {
                 synchronized(this) { if (pending?.second === replyWait) pending = null }
             }
         }
 
-        fun close() {
+        fun close(log: Boolean = true) {
             connected = false
             gatt?.let {
                 runCatching { it.disconnect() }
                 runCatching { it.close() }
             }
             gatt = null
-            BleLog.add(address, "closed")
+            if (log) BleLog.add(address, "Disconnected")
         }
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            BleLog.add(address, "onConnectionStateChange state=$newState status=$status")
+            if (newState == BluetoothProfile.STATE_DISCONNECTED && connected) BleLog.add(address, "Link lost")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 connected = true
                 connectWait.complete(Unit)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connected = false
-                val err = AerException("Device disconnected")
+                val err = AerException("Device disconnected", AerException.Kind.NO_REPLY)
                 connectWait.completeExceptionally(err)
                 discoverWait.completeExceptionally(err)
                 synchronized(this) { pending?.second?.completeExceptionally(err) }
@@ -285,12 +348,10 @@ class AerClient(context: Context, val address: String) {
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
-            BleLog.add(address, "onMtuChanged mtu=$mtu status=$status")
             mtuWait?.complete(if (status == BluetoothGatt.GATT_SUCCESS) mtu else null)
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            BleLog.add(address, "onCharacteristicWrite ${c.uuid} status=$status")
             writeWait?.complete(status)
         }
 
@@ -313,7 +374,6 @@ class AerClient(context: Context, val address: String) {
 
         /** Reassembles fragmented replies until a whole CBOR item decodes. */
         private fun onData(uuid: UUID, value: ByteArray) {
-            BleLog.add(address, "notify $uuid ${value.toHex()}")
             val now = SystemClock.elapsedRealtime()
             lastActivity = now
             val buf = buffers.getOrPut(uuid) { ByteArrayOutputStream() }
@@ -321,7 +381,7 @@ class AerClient(context: Context, val address: String) {
             lastData[uuid] = now
             buf.write(value)
             if (buf.size() > MAX_REPLY_BYTES) {
-                BleLog.add(address, "dropping oversized reply")
+                BleLog.add(address, "Unreadable reply, ignored")
                 buf.reset()
                 return
             }
@@ -331,7 +391,7 @@ class AerClient(context: Context, val address: String) {
             } catch (_: Cbor.Incomplete) {
                 return
             } catch (e: Cbor.Malformed) {
-                BleLog.add(address, "bad reply ${data.toHex()}: ${e.message}")
+                BleLog.add(address, "Unreadable reply, ignored")
                 buf.reset()
                 return
             }

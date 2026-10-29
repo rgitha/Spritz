@@ -48,8 +48,8 @@ fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
         Column(Modifier.padding(padding).verticalScroll(rememberScrollState())) {
             Section("Background checks")
             Text(
-                "Spritz checks each device now and then for low refill, low battery and schedules starting. " +
-                    "Each check briefly connects to the device, so less often saves its batteries.",
+                "Spritz polls the device in the background to update status and provide notifications. " +
+                    "Less frequent polls save device batteries.",
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
@@ -80,8 +80,8 @@ fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
             Section("About")
             Text(
                 "${stringResource(R.string.app_full_name)} ${BuildConfig.VERSION_NAME}\n" +
-                    "Free software under the GNU GPL v3 or later.\n" +
-                    stringResource(R.string.disclaimer),
+                    stringResource(R.string.disclaimer) + "\n" +
+                    "App license: GNU GPL v3 or later.",
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(16.dp),
             )

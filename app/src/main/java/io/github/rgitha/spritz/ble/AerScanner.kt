@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.callbackFlow
 
 data class FoundDevice(val address: String, val name: String, val rssi: Int)
 
-class ScanFailed(val code: Int) : Exception("Bluetooth scan failed (code $code)")
+class ScanFailed(val code: Int) : Exception("Bluetooth search failed (code $code)")
 
 object AerScanner {
     /**

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_label">Spritz</string>
-    <string name="app_full_name">Spritz for Aer SmartMatic</string>
-    <string name="disclaimer">Independent open-source app. Not affiliated with or endorsed by Godrej.</string>
+    <string name="app_full_name">Spritz for Aer Smart Matic</string>
+    <string name="disclaimer">This is an unofficial app. Not affiliated with or endorsed by Godrej. All trademarks for \"Aer smart matic\" belong to the Godrej company and are used here only nominatively.</string>
     <string name="widget_description">Spray now with one tap</string>
-    <string name="widget_label">Spray now</string>
+    <string name="widget_label">Spray</string>
 </resources>

@@ -39,11 +39,10 @@ object BatteryLog {
         return h.copy(points = (h.points + BatteryPoint(at, mv)).takeLast(MAX_POINTS))
     }
 
-    /** Null when there's no history, or too little to say anything ("at least 0 days"). */
-    fun age(h: BatteryHistory, now: Long, zone: ZoneId = ZoneId.systemDefault()): BatteryAge? {
-        val since = h.replacedAt ?: h.points.firstOrNull()?.at ?: return null
+    /** How long the current batteries have been in; 0 days, not exact, with no history yet. */
+    fun age(h: BatteryHistory, now: Long, zone: ZoneId = ZoneId.systemDefault()): BatteryAge {
+        val since = h.replacedAt ?: h.points.firstOrNull()?.at ?: return BatteryAge(0, exact = false, since = now)
         val days = ChronoUnit.DAYS.between(day(since, zone), day(now, zone))
-        if (h.replacedAt == null && days < 1) return null
         return BatteryAge(days, exact = h.replacedAt != null, since = since)
     }
 

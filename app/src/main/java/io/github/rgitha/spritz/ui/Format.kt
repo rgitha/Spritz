@@ -28,12 +28,26 @@ fun rememberClock(): (Int) -> String {
     return remember(context) { { m: Int -> clockText(context, m) } }
 }
 
+/** One or two words for why a command failed, where there's no room for more. */
+fun Throwable.shortReason(): String = when (this) {
+    is RefusedException -> "Refused"
+    is SecurityException -> "No permission"
+    is AerException -> when (kind) {
+        AerException.Kind.NOT_IN_RANGE -> "Not in range"
+        AerException.Kind.BLUETOOTH_OFF -> "Bluetooth off"
+        AerException.Kind.NO_PERMISSION -> "No permission"
+        AerException.Kind.NO_REPLY -> "No reply"
+        AerException.Kind.OTHER -> "Failed"
+    }
+    else -> "Failed"
+}
+
 fun Throwable.userMessage(): String = when (this) {
     is RefusedException -> "The device refused that"
     is AerException -> message ?: "Couldn't reach the device"
     is SecurityException -> "Bluetooth permission not granted"
-    is IllegalStateException -> message ?: "Something went wrong"
-    else -> message ?: "Couldn't reach the device"
+    // Anything else is a system error; its message would only be a class name.
+    else -> "Couldn't reach the device"
 }
 
 fun ago(millis: Long): String =
@@ -52,7 +66,3 @@ fun daysLabel(mask: Int): String {
         else -> days.joinToString(", ") { short(it) }
     }
 }
-
-/** "8:00 AM–10:00 PM every 40 min", with the end rounded down to the last spray. */
-fun Schedule.summary(clock: (Int) -> String) =
-    "${clock(startMinute)}–${clock(displayEndMinute)} every $interval min"

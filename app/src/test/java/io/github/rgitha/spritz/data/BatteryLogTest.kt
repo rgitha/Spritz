@@ -40,17 +40,18 @@ class BatteryLogTest {
     @Test fun ageIsExactOnlyAfterAChangeWasSeen() {
         val now = 10 * day + 12 * 3_600_000L
         val seen = add(add(BatteryHistory(), 0, 2600), 2, 3100)
-        val age = BatteryLog.age(seen, now, utc)!!
+        val age = BatteryLog.age(seen, now, utc)
         assertTrue(age.exact)
         assertEquals(8, age.days)
 
         val unseen = add(BatteryHistory(), 3, 3000)
-        val atLeast = BatteryLog.age(unseen, now, utc)!!
+        val atLeast = BatteryLog.age(unseen, now, utc)
         assertFalse(atLeast.exact)
         assertEquals(7, atLeast.days)
 
-        assertNull(BatteryLog.age(BatteryHistory(), now, utc))
-        assertNull(BatteryLog.age(add(BatteryHistory(), 10, 3000), now, utc))
+        // No history yet, or only today's: 0 days.
+        assertEquals(0, BatteryLog.age(BatteryHistory(), now, utc).days)
+        assertEquals(0, BatteryLog.age(add(BatteryHistory(), 10, 3000), now, utc).days)
     }
 
     @Test fun gapsSplitTheChart() {

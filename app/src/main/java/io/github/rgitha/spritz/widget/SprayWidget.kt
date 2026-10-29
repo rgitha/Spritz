@@ -9,12 +9,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
+import androidx.glance.ColorFilter
 import androidx.glance.GlanceTheme
+import androidx.glance.Image
+import androidx.glance.ImageProvider
 import androidx.glance.action.Action
 import androidx.glance.action.ActionParameters
 import androidx.glance.action.clickable
@@ -33,11 +35,13 @@ import androidx.glance.background
 import androidx.glance.currentState
 import androidx.glance.layout.Alignment
 import androidx.glance.layout.Column
+import androidx.glance.layout.Row
 import androidx.glance.layout.Spacer
 import androidx.glance.layout.fillMaxSize
 import androidx.glance.layout.height
 import androidx.glance.layout.padding
 import androidx.glance.layout.size
+import androidx.glance.layout.width
 import androidx.glance.state.GlanceStateDefinition
 import androidx.glance.state.PreferencesGlanceStateDefinition
 import androidx.glance.text.FontWeight
@@ -45,12 +49,13 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextAlign
 import androidx.glance.text.TextStyle
 import io.github.rgitha.spritz.MainActivity
+import io.github.rgitha.spritz.R
 import io.github.rgitha.spritz.data.DeviceStore
 import io.github.rgitha.spritz.data.SavedDevice
 import io.github.rgitha.spritz.work.SprayWorker
 
 /**
- * A "Spray now" button for one device. Each placed widget keeps its own device,
+ * A "Spray" button for one device. Each placed widget keeps its own device,
  * chosen when it's placed (or changed with Reconfigure), and its own last result.
  */
 class SprayWidget : GlanceAppWidget() {
@@ -82,8 +87,7 @@ class SprayWidget : GlanceAppWidget() {
 
     @Composable
     private fun Content(device: SavedDevice, prefs: Preferences) {
-        val busy = prefs[BUSY] == true && System.currentTimeMillis() - (prefs[AT] ?: 0) < 60_000
-        val result = prefs[TEXT]
+        val outcome = outcomeOf(prefs)
         Column(
             modifier = GlanceModifier
                 .fillMaxSize()
@@ -94,33 +98,54 @@ class SprayWidget : GlanceAppWidget() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (busy) {
-                CircularProgressIndicator(
-                    modifier = GlanceModifier.size(28.dp),
-                    color = GlanceTheme.colors.onPrimaryContainer,
-                )
-            } else {
+            // "Spray" and the device stay put; a small mark beside "Spray" shows
+            // progress, then a tick or cross, as in the app.
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Spray now",
+                    "Spray",
                     style = TextStyle(
                         color = GlanceTheme.colors.onPrimaryContainer,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        textAlign = TextAlign.Center,
+                        fontSize = 14.sp,
                     ),
                 )
+                when (outcome) {
+                    RUNNING -> {
+                        Spacer(GlanceModifier.width(4.dp))
+                        CircularProgressIndicator(
+                            modifier = GlanceModifier.size(12.dp),
+                            color = GlanceTheme.colors.onPrimaryContainer,
+                        )
+                    }
+                    OK -> {
+                        Spacer(GlanceModifier.width(4.dp))
+                        Image(
+                            ImageProvider(R.drawable.ic_widget_check),
+                            contentDescription = "Sprayed",
+                            colorFilter = ColorFilter.tint(GlanceTheme.colors.onPrimaryContainer),
+                            modifier = GlanceModifier.size(12.dp),
+                        )
+                    }
+                    FAILED -> {
+                        Spacer(GlanceModifier.width(4.dp))
+                        Image(
+                            ImageProvider(R.drawable.ic_widget_close),
+                            contentDescription = "Spray failed",
+                            colorFilter = ColorFilter.tint(GlanceTheme.colors.error),
+                            modifier = GlanceModifier.size(12.dp),
+                        )
+                    }
+                }
             }
             Spacer(GlanceModifier.height(4.dp))
+            // A failure's short reason stands in for the device while the cross shows.
+            val error = prefs[ERROR].takeIf { outcome == FAILED }
             Text(
-                when {
-                    busy -> "Spraying…"
-                    !result.isNullOrEmpty() -> result
-                    else -> device.label
-                },
+                error ?: device.label,
                 maxLines = 2,
                 style = TextStyle(
-                    color = GlanceTheme.colors.onPrimaryContainer,
-                    fontSize = 11.sp,
+                    color = if (error != null) GlanceTheme.colors.error else GlanceTheme.colors.onPrimaryContainer,
+                    fontSize = 10.sp,
                     textAlign = TextAlign.Center,
                 ),
             )
@@ -149,12 +174,24 @@ class SprayWidget : GlanceAppWidget() {
 
     companion object {
         val ADDRESS = stringPreferencesKey("address")
-        val TEXT = stringPreferencesKey("text")
+        /** [RUNNING], [OK] or [FAILED] for the last spray; absent when there's nothing to show. */
+        val OUTCOME = stringPreferencesKey("outcome")
         val AT = longPreferencesKey("at")
-        val BUSY = booleanPreferencesKey("busy")
+        /** The short reason for a failed spray, shown with the cross. */
+        val ERROR = stringPreferencesKey("error")
 
-        /** How long a widget shows the result of a spray before its device again. */
+        const val RUNNING = "running"
+        const val OK = "ok"
+        const val FAILED = "failed"
+
+        /** How long the tick or cross stays. */
         const val RESULT_MS = 3_000L
+
+        /** A spray never takes a minute, so an older "running" means the worker was lost. */
+        fun outcomeOf(prefs: Preferences): String? {
+            val o = prefs[OUTCOME]
+            return if (o == RUNNING && System.currentTimeMillis() - (prefs[AT] ?: 0) > 60_000) null else o
+        }
 
         suspend fun refresh(context: Context) = SprayWidget().updateAll(context)
 
@@ -170,8 +207,7 @@ class SprayWidget : GlanceAppWidget() {
             val id = GlanceAppWidgetManager(context).getGlanceIdBy(appWidgetId)
             updateAppWidgetState(context, id) {
                 it[ADDRESS] = address
-                it.remove(TEXT)
-                it[BUSY] = false
+                it.remove(OUTCOME)
             }
             SprayWidget().update(context, id)
         }
@@ -191,15 +227,12 @@ class SprayAction : ActionCallback {
         val store = DeviceStore.get(context)
         var address: String? = null
         updateAppWidgetState(context, glanceId) { prefs ->
-            val busy = prefs[SprayWidget.BUSY] == true &&
-                System.currentTimeMillis() - (prefs[SprayWidget.AT] ?: 0) < 60_000
-            if (busy) return@updateAppWidgetState
+            if (SprayWidget.outcomeOf(prefs) == SprayWidget.RUNNING) return@updateAppWidgetState
             address = prefs[SprayWidget.ADDRESS]
                 ?: SprayWidget.legacyDevice(store.devicesNow(), store.settingsNow().widgetDevice)?.address
             if (address != null) {
-                prefs[SprayWidget.BUSY] = true
+                prefs[SprayWidget.OUTCOME] = SprayWidget.RUNNING
                 prefs[SprayWidget.AT] = System.currentTimeMillis()
-                prefs.remove(SprayWidget.TEXT)
             }
         }
         val target = address ?: return

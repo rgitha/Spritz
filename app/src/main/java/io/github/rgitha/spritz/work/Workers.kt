@@ -18,12 +18,15 @@ import androidx.work.workDataOf
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.state.updateAppWidgetState
 import kotlinx.coroutines.delay
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import io.github.rgitha.spritz.ui.shortReason
+import io.github.rgitha.spritz.ui.userMessage
 import io.github.rgitha.spritz.R
 import io.github.rgitha.spritz.data.SpritzRepository
 import io.github.rgitha.spritz.notify.Notifier
 import io.github.rgitha.spritz.widget.SprayWidget
-import java.text.DateFormat
-import java.util.Date
 import java.util.concurrent.TimeUnit
 
 /** Reads every device's status in the background, which drives the notifications. */
@@ -62,20 +65,31 @@ class SprayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         val ctx = applicationContext
         val appWidgetId = inputData.getInt(KEY_WIDGET, -1)
         val address = inputData.getString(KEY_ADDRESS) ?: return Result.failure()
-        val text = runCatching { SpritzRepository.get(ctx).spray(address) }.fold(
-            onSuccess = { "Sprayed at ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())}" },
-            onFailure = { it.message ?: "Spray failed" },
-        )
+        val repo = SpritzRepository.get(ctx)
+        val error = runCatching { repo.spray(address) }.exceptionOrNull()
+        if (error != null) {
+            // The full reason as a toast; the widget only has room for a word or two.
+            val label = repo.store.devicesNow().find { it.address == address }?.label
+            val text = listOfNotNull(label, error.userMessage()).joinToString(": ")
+            Handler(Looper.getMainLooper()).post { Toast.makeText(ctx, text, Toast.LENGTH_LONG).show() }
+        }
         val id = runCatching { GlanceAppWidgetManager(ctx).getGlanceIdBy(appWidgetId) }.getOrNull()
             ?: return Result.success()
         updateAppWidgetState(ctx, id) {
-            it[SprayWidget.BUSY] = false
-            it[SprayWidget.TEXT] = text
+            if (error == null) {
+                it[SprayWidget.OUTCOME] = SprayWidget.OK
+            } else {
+                it[SprayWidget.OUTCOME] = SprayWidget.FAILED
+                it[SprayWidget.ERROR] = error.shortReason()
+            }
         }
         SprayWidget().update(ctx, id)
-        // Then back to the device's name.
+        // Then the mark goes.
         delay(SprayWidget.RESULT_MS)
-        updateAppWidgetState(ctx, id) { it.remove(SprayWidget.TEXT) }
+        updateAppWidgetState(ctx, id) {
+            it.remove(SprayWidget.OUTCOME)
+            it.remove(SprayWidget.ERROR)
+        }
         SprayWidget().update(ctx, id)
         return Result.success()
     }
