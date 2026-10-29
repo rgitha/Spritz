@@ -10,6 +10,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -18,6 +20,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import io.github.rgitha.spritz.data.DeviceStore
 import io.github.rgitha.spritz.ui.AddDeviceScreen
+import io.github.rgitha.spritz.ui.DeviceSettingsScreen
+import io.github.rgitha.spritz.ui.Removed
 import io.github.rgitha.spritz.ui.HomeScreen
 import io.github.rgitha.spritz.ui.LogScreen
 import io.github.rgitha.spritz.ui.ScheduleScreen
@@ -52,12 +56,31 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 NavHost(nav, startDestination = "home") {
-                    composable("home") {
+                    composable("home") { entry ->
+                        // Set by Device settings after a removal.
+                        val removed by entry.savedStateHandle.getStateFlow<String?>(REMOVED, null).collectAsState()
                         HomeScreen(
+                            removed = removed?.split('\n')?.let { Removed(it[0], it.getOrElse(1) { "" }) },
                             onAdd = { nav.navigate("add") },
                             onSchedules = { nav.navigate("schedules/$it") },
+                            onDeviceSettings = { nav.navigate("device/$it") },
                             onSettings = { nav.navigate("settings") },
-                            onLog = { nav.navigate("log") },
+                        )
+                        LaunchedEffect(removed) { if (removed != null) entry.savedStateHandle[REMOVED] = null }
+                    }
+                    composable(
+                        "device/{address}",
+                        arguments = listOf(navArgument("address") { type = NavType.StringType }),
+                    ) { entry ->
+                        val address = entry.arguments!!.getString("address")!!
+                        DeviceSettingsScreen(
+                            address = address,
+                            onBack = { nav.popBackStack() },
+                            onLog = { nav.navigate("log?address=$address") },
+                            onRemoved = { r ->
+                                nav.getBackStackEntry("home").savedStateHandle[REMOVED] = "${r.name}\n${r.address}"
+                                nav.popBackStack("home", inclusive = false)
+                            },
                         )
                     }
                     composable("add") {
@@ -78,7 +101,12 @@ class MainActivity : ComponentActivity() {
                     composable("settings") {
                         SettingsScreen(onBack = { nav.popBackStack() }, onLog = { nav.navigate("log") })
                     }
-                    composable("log") { LogScreen(onBack = { nav.popBackStack() }) }
+                    composable(
+                        "log?address={address}",
+                        arguments = listOf(navArgument("address") { type = NavType.StringType; nullable = true }),
+                    ) { entry ->
+                        LogScreen(address = entry.arguments?.getString("address"), onBack = { nav.popBackStack() })
+                    }
                 }
             }
         }
@@ -91,5 +119,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_DEVICE = "device"
+        private const val REMOVED = "removed"
     }
 }

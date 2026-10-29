@@ -14,9 +14,12 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
+import androidx.glance.appwidget.GlanceAppWidgetManager
+import androidx.glance.appwidget.state.updateAppWidgetState
+import kotlinx.coroutines.delay
 import io.github.rgitha.spritz.R
 import io.github.rgitha.spritz.data.SpritzRepository
-import io.github.rgitha.spritz.data.WidgetState
 import io.github.rgitha.spritz.notify.Notifier
 import io.github.rgitha.spritz.widget.SprayWidget
 import java.text.DateFormat
@@ -53,22 +56,27 @@ class StatusPollWorker(context: Context, params: WorkerParameters) : CoroutineWo
     }
 }
 
-/** Sprays the widget's device once. Expedited so a widget tap acts at once. */
+/** Sprays a widget's device. Expedited so a widget tap acts at once. */
 class SprayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val ctx = applicationContext
-        val repo = SpritzRepository.get(ctx)
-        val device = repo.store.widgetDevice()
-        val text = if (device == null) {
-            "Add a device in Spritz first"
-        } else {
-            runCatching { repo.spray(device.address) }.fold(
-                onSuccess = { "Sprayed at ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())}" },
-                onFailure = { it.message ?: "Spray failed" },
-            )
+        val appWidgetId = inputData.getInt(KEY_WIDGET, -1)
+        val address = inputData.getString(KEY_ADDRESS) ?: return Result.failure()
+        val text = runCatching { SpritzRepository.get(ctx).spray(address) }.fold(
+            onSuccess = { "Sprayed at ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())}" },
+            onFailure = { it.message ?: "Spray failed" },
+        )
+        val id = runCatching { GlanceAppWidgetManager(ctx).getGlanceIdBy(appWidgetId) }.getOrNull()
+            ?: return Result.success()
+        updateAppWidgetState(ctx, id) {
+            it[SprayWidget.BUSY] = false
+            it[SprayWidget.TEXT] = text
         }
-        repo.store.setWidgetState(WidgetState(text, System.currentTimeMillis(), busy = false))
-        SprayWidget.refresh(ctx)
+        SprayWidget().update(ctx, id)
+        // Then back to the device's name.
+        delay(SprayWidget.RESULT_MS)
+        updateAppWidgetState(ctx, id) { it.remove(SprayWidget.TEXT) }
+        SprayWidget().update(ctx, id)
         return Result.success()
     }
 
@@ -88,11 +96,15 @@ class SprayWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
     companion object {
         private const val FG_ID = 1001
 
-        fun enqueue(context: Context) {
+        private const val KEY_WIDGET = "widget"
+        private const val KEY_ADDRESS = "address"
+
+        fun enqueue(context: Context, appWidgetId: Int, address: String) {
             val request = OneTimeWorkRequestBuilder<SprayWorker>()
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setInputData(workDataOf(KEY_WIDGET to appWidgetId, KEY_ADDRESS to address))
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork("spray", ExistingWorkPolicy.KEEP, request)
+            WorkManager.getInstance(context).enqueueUniqueWork("spray-$appWidgetId", ExistingWorkPolicy.KEEP, request)
         }
     }
 }

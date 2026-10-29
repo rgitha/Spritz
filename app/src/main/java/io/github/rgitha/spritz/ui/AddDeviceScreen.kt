@@ -178,9 +178,7 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
         SetupDialog(
             address = d.address,
             initialName = d.name,
-            initialRoom = null,
             others = saved,
-            isNew = true,
             onDismiss = { settingUp = null },
             onConfirm = { name, room ->
                 settingUp = null

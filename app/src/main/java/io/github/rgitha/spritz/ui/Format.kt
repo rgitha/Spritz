@@ -1,26 +1,31 @@
 package io.github.rgitha.spritz.ui
 
+import android.content.Context
 import android.text.format.DateUtils
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import io.github.rgitha.spritz.ble.AerException
 import io.github.rgitha.spritz.ble.RefusedException
-import io.github.rgitha.spritz.protocol.Mode
-import io.github.rgitha.spritz.protocol.ModeSource
 import io.github.rgitha.spritz.protocol.Schedule
 import java.time.DayOfWeek
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
 import java.time.format.TextStyle
 import java.util.Locale
 
-fun Mode.label(): String {
-    val every = interval?.let { " · every $it min" } ?: ""
-    return when (source) {
-        null -> "Idle"
-        ModeSource.APP -> "Auto$every"
-        ModeSource.SCHEDULE -> "Schedule running$every"
-        ModeSource.BUTTON -> "Auto from device button$every"
+/** A minute of the day in the phone's time format, 12- or 24-hour. */
+fun clockText(context: Context, minuteOfDay: Int): String {
+    val cal = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, minuteOfDay / 60)
+        set(java.util.Calendar.MINUTE, minuteOfDay % 60)
     }
+    return android.text.format.DateFormat.getTimeFormat(context).format(cal.time)
+}
+
+/** [clockText] bound to the current context, for composables. */
+@Composable
+fun rememberClock(): (Int) -> String {
+    val context = LocalContext.current
+    return remember(context) { { m: Int -> clockText(context, m) } }
 }
 
 fun Throwable.userMessage(): String = when (this) {
@@ -35,11 +40,6 @@ fun ago(millis: Long): String =
     if (millis == 0L) "never"
     else DateUtils.getRelativeTimeSpanString(millis, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
 
-private val timeFormat = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
-
-fun minuteOfDay(m: Int): String =
-    if (m >= 24 * 60) "midnight" else LocalTime.of(m / 60, m % 60).format(timeFormat)
-
 /** "Mon–Fri", "Every day", "Weekends" or "Mon, Wed, Sat". */
 fun daysLabel(mask: Int): String {
     val days = DayOfWeek.entries.filter { mask and Schedule.dayBit(it) != 0 }
@@ -53,5 +53,6 @@ fun daysLabel(mask: Int): String {
     }
 }
 
-fun Schedule.summary() =
-    "${minuteOfDay(startMinute)} – ${minuteOfDay(endMinute)} · $sprays sprays, every $interval min"
+/** "8:00 AM–10:00 PM every 40 min", with the end rounded down to the last spray. */
+fun Schedule.summary(clock: (Int) -> String) =
+    "${clock(startMinute)}–${clock(displayEndMinute)} every $interval min"

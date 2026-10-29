@@ -5,12 +5,16 @@ import io.github.rgitha.spritz.ble.AerClient
 import io.github.rgitha.spritz.ble.AerClients
 import io.github.rgitha.spritz.notify.Notifier
 import io.github.rgitha.spritz.protocol.DeviceStatus
+import io.github.rgitha.spritz.protocol.ModeSource
 import io.github.rgitha.spritz.protocol.Schedule
+import io.github.rgitha.spritz.widget.SprayWidget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import java.time.LocalDateTime
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -78,9 +82,29 @@ class SpritzRepository private constructor(private val context: Context) {
         return record(address, status)
     }
 
-    suspend fun readSchedules(address: String): List<Schedule> = client(address).readSchedules()
+    suspend fun readSchedules(address: String): List<Schedule> =
+        client(address).readSchedules().also { cacheSchedules(address, it) }
 
-    suspend fun writeSchedules(address: String, list: List<Schedule>) = client(address).writeSchedules(list)
+    suspend fun writeSchedules(address: String, list: List<Schedule>) {
+        client(address).writeSchedules(list)
+        cacheSchedules(address, list)
+    }
+
+    private suspend fun cacheSchedules(address: String, list: List<Schedule>) =
+        store.update(address) { it.copy(schedules = list, schedulesAt = System.currentTimeMillis()) }
+
+    /** The schedule the device is running now, from the saved copy of its list. */
+    fun runningSchedule(d: SavedDevice): Schedule? {
+        val mode = d.status?.mode ?: return null
+        if (mode.source != ModeSource.SCHEDULE) return null
+        val now = LocalDateTime.now()
+        return Schedule.running(d.schedules.orEmpty(), now.dayOfWeek, now.hour * 60 + now.minute, mode.interval)
+    }
+
+    /** Renames or moves a device in the background, so leaving a screen can't cut it short. */
+    fun editDevice(address: String, name: String, room: String?) {
+        scope.launch { store.edit(address, name, room) }
+    }
 
     suspend fun removeDevice(address: String) {
         AerClients.remove(address)
@@ -91,19 +115,40 @@ class SpritzRepository private constructor(private val context: Context) {
                 lastDevice = it.lastDevice.takeIf { a -> a != address },
             )
         }
+        // Its widgets now say it was removed.
+        SprayWidget.refresh(context)
     }
 
     private suspend fun record(address: String, status: DeviceStatus): DeviceStatus {
         val before = store.devicesNow().find { it.address == address } ?: return status
-        var after = before.copy(status = status, statusAt = System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        var after = before.copy(status = status, statusAt = now)
+        status.batteryMv?.let { after = after.copy(battery = BatteryLog.add(after.battery, now, it)) }
         // Counters went backwards (e.g. reset by the device): the old baseline no longer applies.
         if (status.totalSprays < after.refillBaseline) after = after.copy(refillBaseline = 0)
-        after = Notifier.check(context, store.settingsNow(), before, after)
-        store.update(address) { after }
+        // A schedule is running that the saved list doesn't explain: read the list once.
+        if (status.mode.source == ModeSource.SCHEDULE && runningSchedule(after) == null &&
+            now - after.schedulesAt > SCHEDULES_RECHECK_MS
+        ) {
+            runCatching { client(address).readSchedules() }.onSuccess {
+                after = after.copy(schedules = it, schedulesAt = System.currentTimeMillis())
+            }
+        }
+        after = Notifier.check(context, store.settingsNow(), before, after, runningSchedule(after))
+        store.update(address) {
+            it.copy(
+                status = after.status, statusAt = after.statusAt, refillBaseline = after.refillBaseline,
+                lowRefillNotified = after.lowRefillNotified, lowBatteryNotified = after.lowBatteryNotified,
+                schedules = after.schedules, schedulesAt = after.schedulesAt, battery = after.battery,
+            )
+        }
         return status
     }
 
     companion object {
+        /** How soon to read the schedule list again when it doesn't explain a running schedule. */
+        private const val SCHEDULES_RECHECK_MS = 10 * 60_000L
+
         /** A setup read older than this isn't worth keeping. */
         private const val ADOPT_MS = 60_000L
 

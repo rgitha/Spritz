@@ -16,6 +16,8 @@ import io.github.rgitha.spritz.R
 import io.github.rgitha.spritz.data.SavedDevice
 import io.github.rgitha.spritz.data.Settings
 import io.github.rgitha.spritz.protocol.ModeSource
+import io.github.rgitha.spritz.protocol.Schedule
+import io.github.rgitha.spritz.ui.clockText
 
 object Notifier {
     const val CHANNEL_ALERTS = "alerts"
@@ -46,7 +48,13 @@ object Notifier {
      * Posts any notifications the change from [before] to [after] calls for,
      * and returns [after] with its notified flags updated.
      */
-    fun check(context: Context, settings: Settings, before: SavedDevice, after: SavedDevice): SavedDevice {
+    fun check(
+        context: Context,
+        settings: Settings,
+        before: SavedDevice,
+        after: SavedDevice,
+        running: Schedule? = null,
+    ): SavedDevice {
         val status = after.status ?: return after
         var result = after
 
@@ -84,8 +92,11 @@ object Notifier {
         val mode = status.mode
         if (settings.notifyScheduleStart && mode.source == ModeSource.SCHEDULE && !wasScheduled) {
             val every = mode.interval?.let { " every $it min" } ?: ""
+            val window = running?.let {
+                ", ${clockText(context, it.startMinute)} to ${clockText(context, it.displayEndMinute)}"
+            } ?: ""
             post(context, after, KIND_SCHEDULE, CHANNEL_SCHEDULE, "Schedule started: ${after.label}",
-                "Spraying$every.")
+                "Spraying$every$window.")
         }
         return result
     }

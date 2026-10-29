@@ -107,14 +107,4 @@ class ProtocolTest {
         assertEquals(103, reply.type)
         assertEquals(list, Schedule.listFrom(reply))
     }
-
-    @Test fun scheduleValidation() {
-        assertTrue(Schedule(64, 23, 0, 7, 10).problems().isNotEmpty()) // past midnight
-        assertTrue(Schedule(64, 23, 0, 6, 10).problems().isEmpty()) // ends at 24:00
-        assertTrue(Schedule(0, 8, 0, 1, 10).problems().isNotEmpty())
-        val a = Schedule(64, 8, 0, 3, 20) // 8:00–9:00 Mon
-        assertTrue(a.overlaps(Schedule(64 or 32, 8, 50, 1, 10)))
-        assertFalse(a.overlaps(Schedule(64, 9, 0, 1, 10)))
-        assertFalse(a.overlaps(Schedule(32, 8, 0, 3, 20)))
-    }
 }

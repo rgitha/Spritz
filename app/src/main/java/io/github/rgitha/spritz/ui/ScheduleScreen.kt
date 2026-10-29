@@ -19,7 +19,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -41,6 +40,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
+import androidx.compose.material3.TimePickerState
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
@@ -105,9 +105,9 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
 
     fun save() {
         val list = schedules.value ?: return
-        val problems = list.flatMap { it.problems() } + Schedule.listProblems(list)
-        if (problems.isNotEmpty()) {
-            commands.toast(problems.first())
+        // Each window is checked in the editor; only the count can still be wrong here.
+        if (list.size > Schedule.MAX) {
+            commands.toast("The device holds at most ${Schedule.MAX} schedules.")
             return
         }
         commands.run(KEY_SAVE) {
@@ -117,12 +117,8 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
         }
     }
 
-    /** Skips the rest of today's run of the schedule at [index], as stored on the device. */
-    fun skipToday(index: Int) = commands.run(skipKey(index)) { repo.stopRun(address, index) }
-
     companion object {
         const val KEY_SAVE = "save"
-        fun skipKey(index: Int) = "skip:$index"
     }
 }
 
@@ -135,7 +131,6 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
     val dirty by vm.dirty.collectAsState()
     val loading by vm.loading.collectAsState()
     val outcomes by vm.commands.outcomes.collectAsState()
-    val saving = outcomes[ScheduleViewModel.KEY_SAVE] == Outcome.RUNNING
 
     /** null: closed; -1: new schedule; otherwise the index being edited. */
     var editing by remember { mutableStateOf<Int?>(null) }
@@ -203,14 +198,7 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
                         }
                     }
                     itemsIndexed(l) { i, s ->
-                        ScheduleItem(
-                            s,
-                            outcome = outcomes[ScheduleViewModel.skipKey(i)],
-                            canSkip = !dirty && !saving,
-                            onEdit = { editing = i },
-                            onDelete = { vm.delete(i) },
-                            onSkip = { vm.skipToday(i) },
-                        )
+                        ScheduleItem(s, onEdit = { editing = i }, onDelete = { vm.delete(i) })
                     }
                 }
             }
@@ -238,33 +226,19 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun ScheduleItem(
-    s: Schedule,
-    outcome: Outcome?,
-    canSkip: Boolean,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onSkip: () -> Unit,
-) {
+private fun ScheduleItem(s: Schedule, onEdit: () -> Unit, onDelete: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
+    val clock = rememberClock()
     Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
         ListItem(
             headlineContent = { Text(daysLabel(s.dayMask)) },
-            supportingContent = { Text(s.summary()) },
+            supportingContent = { Text(s.summary(clock)) },
             trailingContent = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutcomeMark(outcome)
-                    Box {
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; onEdit() })
-                            DropdownMenuItem(
-                                text = { Text("Skip today's run") },
-                                enabled = canSkip,
-                                onClick = { menu = false; onSkip() },
-                            )
-                            DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
-                        }
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; onEdit() })
+                        DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
                     }
                 }
             },
@@ -276,13 +250,19 @@ private fun ScheduleItem(
 @Composable
 private fun ScheduleEditor(initial: Schedule?, others: List<Schedule>, onDismiss: () -> Unit, onDone: (Schedule) -> Unit) {
     var days by remember { mutableIntStateOf(initial?.dayMask ?: 0x7F) }
-    val time = rememberTimePickerState(initial?.hour ?: 8, initial?.minute ?: 0)
-    var sprays by remember { mutableIntStateOf(initial?.sprays ?: 6) }
+    val clock = rememberClock()
+    val is24 = android.text.format.DateFormat.is24HourFormat(LocalContext.current)
+    val start = rememberTimePickerState(initial?.hour ?: 8, initial?.minute ?: 0, is24Hour = is24)
+    // The device stores a spray count; editing shows the end it works out to.
+    val initialEnd = initial?.displayEndMinute ?: (10 * 60)
+    val end = rememberTimePickerState(initialEnd / 60, initialEnd % 60, is24Hour = is24)
     var interval by remember { mutableIntStateOf(initial?.interval ?: 20) }
-    var pickingTime by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf<TimePickerState?>(null) }
 
-    val s = Schedule(days, time.hour, time.minute, sprays, interval)
-    val problems = s.problems() + others.filter { it.overlaps(s) }.map { "Overlaps ${daysLabel(it.dayMask)} ${it.summary()}" }
+    val startMin = start.hour * 60 + start.minute
+    val endMin = end.hour * 60 + end.minute
+    val errors = Schedule.windowErrors(days, startMin, endMin, interval, others, clock)
+    val s = Schedule.fromWindow(days, startMin, endMin, interval)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -300,8 +280,16 @@ private fun ScheduleEditor(initial: Schedule?, others: List<Schedule>, onDismiss
                         )
                     }
                 }
-                Text("Start", style = MaterialTheme.typography.labelLarge)
-                OutlinedButton(onClick = { pickingTime = true }) { Text(minuteOfDay(s.startMinute)) }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Start", style = MaterialTheme.typography.labelLarge)
+                        OutlinedButton(onClick = { picking = start }) { Text(clock(startMin)) }
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("End", style = MaterialTheme.typography.labelLarge)
+                        OutlinedButton(onClick = { picking = end }) { Text(clock(endMin)) }
+                    }
+                }
                 Text("Every", style = MaterialTheme.typography.labelLarge)
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     INTERVALS.forEachIndexed { i, v ->
@@ -312,32 +300,27 @@ private fun ScheduleEditor(initial: Schedule?, others: List<Schedule>, onDismiss
                         ) { Text("$v min") }
                     }
                 }
-                Text("Sprays", style = MaterialTheme.typography.labelLarge)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { sprays-- }, enabled = sprays > 1) {
-                        Icon(Icons.Default.Remove, contentDescription = "Fewer")
-                    }
-                    Text("$sprays", style = MaterialTheme.typography.titleLarge)
-                    IconButton(onClick = { sprays++ }, enabled = sprays < 255) {
-                        Icon(Icons.Default.Add, contentDescription = "More")
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text("ends ${minuteOfDay(s.endMinute)}", style = MaterialTheme.typography.bodyMedium)
+                // The rounding, visible before saving.
+                if (s.sprays >= 1 && endMin > startMin) {
+                    Text(
+                        "Ends at ${clock(s.displayEndMinute)} (${s.sprays} sprays)",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
-                problems.forEach {
+                errors.forEach {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
         },
-        confirmButton = { TextButton(enabled = problems.isEmpty(), onClick = { onDone(s) }) { Text("Done") } },
+        confirmButton = { TextButton(enabled = errors.isEmpty(), onClick = { onDone(s) }) { Text("Done") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 
-    if (pickingTime) {
+    picking?.let { state ->
         AlertDialog(
-            onDismissRequest = { pickingTime = false },
-            text = { TimePicker(state = time) },
-            confirmButton = { TextButton(onClick = { pickingTime = false }) { Text("OK") } },
+            onDismissRequest = { picking = null },
+            text = { TimePicker(state = state) },
+            confirmButton = { TextButton(onClick = { picking = null }) { Text("OK") } },
         )
     }
 }

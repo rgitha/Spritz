@@ -28,7 +28,6 @@ import io.github.rgitha.spritz.BuildConfig
 import io.github.rgitha.spritz.R
 import io.github.rgitha.spritz.data.DeviceStore
 import io.github.rgitha.spritz.data.Settings
-import io.github.rgitha.spritz.widget.SprayWidget
 import io.github.rgitha.spritz.work.StatusPollWorker
 import kotlinx.coroutines.launch
 
@@ -41,11 +40,10 @@ fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
     val context = LocalContext.current
     val store = remember { DeviceStore.get(context) }
     val settings by store.settings.collectAsState(initial = null)
-    val devices by store.devices.collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     fun change(f: (Settings) -> Settings) = scope.launch { store.updateSettings(f) }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Settings") }, navigationIcon = { BackButton(onBack) }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text("App settings") }, navigationIcon = { BackButton(onBack) }) }) { padding ->
         val s = settings ?: return@Scaffold
         Column(Modifier.padding(padding).verticalScroll(rememberScrollState())) {
             Section("Background checks")
@@ -72,27 +70,10 @@ fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
             Toggle("Schedule started", s.notifyScheduleStart, "Seen at the next check, so it can be late") { v ->
                 change { it.copy(notifyScheduleStart = v) }
             }
-            if (devices.size > 1) {
-                HorizontalDivider()
-                Section("Widget sprays")
-                val chosen = devices.find { it.address == s.widgetDevice } ?: devices.first()
-                devices.forEach { d ->
-                    ListItem(
-                        headlineContent = { Text(d.label) },
-                        leadingContent = { RadioButton(selected = d.address == chosen.address, onClick = null) },
-                        modifier = Modifier.selectable(selected = d.address == chosen.address) {
-                            scope.launch {
-                                store.updateSettings { it.copy(widgetDevice = d.address) }
-                                SprayWidget.refresh(context)
-                            }
-                        },
-                    )
-                }
-            }
             HorizontalDivider()
             ListItem(
                 headlineContent = { Text("Connection log") },
-                supportingContent = { Text("Recent Bluetooth traffic, for troubleshooting") },
+                supportingContent = { Text("Recent Bluetooth traffic for all devices, for troubleshooting") },
                 modifier = Modifier.clickable(onClick = onLog),
             )
             HorizontalDivider()

@@ -7,6 +7,14 @@ enum class ModeSource { APP, SCHEDULE, BUTTON }
 data class Mode(val source: ModeSource?, val interval: Int?) {
     val isIdle get() = source == null
 
+    /** Idle, Auto or Schedule; auto mode from the device button counts as Auto. */
+    val shortLabel: String
+        get() = when (source) {
+            null -> "Idle"
+            ModeSource.SCHEDULE -> "Schedule"
+            else -> "Auto"
+        }
+
     companion object {
         val IDLE = Mode(null, null)
 

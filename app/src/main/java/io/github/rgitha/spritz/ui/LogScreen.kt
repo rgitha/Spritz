@@ -20,18 +20,32 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.rgitha.spritz.BuildConfig
 import io.github.rgitha.spritz.ble.BleLog
+import io.github.rgitha.spritz.data.DeviceStore
 
+/**
+ * Recent Bluetooth traffic. With an [address], only that device's lines; without,
+ * every line, each starting with its device's name.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LogScreen(onBack: () -> Unit) {
+fun LogScreen(address: String?, onBack: () -> Unit) {
     val context = LocalContext.current
-    val lines by BleLog.lines.collectAsState()
+    val all by BleLog.lines.collectAsState()
+    val devices by remember { DeviceStore.get(context).devices }.collectAsState(initial = emptyList())
+    val names = devices.associate { it.address to it.label }
+    val lines = all
+        .filter { address == null || it.address == address }
+        .map { line ->
+            val who = if (address == null && line.address != null) "${names[line.address] ?: line.address} · " else ""
+            "${line.time} $who${line.text}"
+        }
     val list = rememberLazyListState()
     LaunchedEffect(lines.size) { if (lines.isNotEmpty()) list.scrollToItem(lines.size - 1) }
 
@@ -42,12 +56,15 @@ fun LogScreen(onBack: () -> Unit) {
                 navigationIcon = { BackButton(onBack) },
                 actions = {
                     IconButton(onClick = {
+                        val device = address?.let { "Device ${names[it] ?: it} ($it)\n" } ?: ""
                         val text = "Spritz ${BuildConfig.VERSION_NAME}, Android ${android.os.Build.VERSION.RELEASE}, " +
-                            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\n" + lines.joinToString("\n")
+                            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}\n" + device + lines.joinToString("\n")
                         val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
                         context.startActivity(Intent.createChooser(send, "Share log"))
                     }) { Icon(Icons.Default.Share, contentDescription = "Share") }
-                    IconButton(onClick = BleLog::clear) { Icon(Icons.Default.Delete, contentDescription = "Clear") }
+                    IconButton(onClick = { BleLog.clear(address) }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Clear")
+                    }
                 },
             )
         },

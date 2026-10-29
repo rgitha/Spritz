@@ -210,17 +210,17 @@ class AerClient(context: Context, val address: String) {
             // link that can't carry them.
             val mtu = CompletableDeferred<Int?>().also { mtuWait = it }
             val agreed = if (g.requestMtu(REQUESTED_MTU)) withTimeoutOrNull(1000) { mtu.await() } else null
-            BleLog.add("MTU: $agreed")
+            BleLog.add(address, "MTU: $agreed")
             if (agreed != null && agreed < MIN_MTU) throw AerException("Link too small ($agreed bytes)")
             val notify = service.getCharacteristic(AerUuids.NOTIFY)
                 ?: throw AerException("Notify characteristic missing")
             // 0001 has no CCCD, so register locally only; the device notifies without one.
             val subscribed = g.setCharacteristicNotification(notify, true)
-            BleLog.add("setCharacteristicNotification ${notify.uuid}: $subscribed")
+            BleLog.add(address, "setCharacteristicNotification ${notify.uuid}: $subscribed")
             if (!subscribed) throw AerException("Couldn't subscribe")
             connectedAt = SystemClock.elapsedRealtime()
             lastActivity = connectedAt
-            BleLog.add("$address connected")
+            BleLog.add(address, "connected")
         }
 
         suspend fun waitSinceConnect(ms: Long) {
@@ -238,15 +238,15 @@ class AerClient(context: Context, val address: String) {
             try {
                 val written = CompletableDeferred<Int>().also { writeWait = it }
                 val rc = writeCharacteristic(g, c, frame)
-                BleLog.add("writeCharacteristic $char ${frame.toHex()} -> $rc")
+                BleLog.add(address, "writeCharacteristic $char ${frame.toHex()} -> $rc")
                 lastActivity = SystemClock.elapsedRealtime()
                 if (rc != WRITE_STARTED) throw AerException("Write failed ($rc)")
                 val status = withTimeoutOrNull(REPLY_TIMEOUT_MS) { written.await() }
-                    ?: throw AerException("Write timed out").also { BleLog.add("no onCharacteristicWrite within ${REPLY_TIMEOUT_MS}ms") }
+                    ?: throw AerException("Write timed out").also { BleLog.add(address, "no onCharacteristicWrite within ${REPLY_TIMEOUT_MS}ms") }
                 if (status != BluetoothGatt.GATT_SUCCESS) throw AerException("Write failed ($status)")
                 val reply = withTimeoutOrNull(REPLY_TIMEOUT_MS) { replyWait.await() }
                     ?: throw AerException(if (connected) "No reply from the device" else "Device disconnected")
-                        .also { BleLog.add("no reply $expected within ${REPLY_TIMEOUT_MS}ms") }
+                        .also { BleLog.add(address, "no reply $expected within ${REPLY_TIMEOUT_MS}ms") }
                 if (reply.isRefusalOf(expected)) throw RefusedException(type)
                 return reply
             } finally {
@@ -261,11 +261,11 @@ class AerClient(context: Context, val address: String) {
                 runCatching { it.close() }
             }
             gatt = null
-            BleLog.add("$address closed")
+            BleLog.add(address, "closed")
         }
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            BleLog.add("onConnectionStateChange state=$newState status=$status")
+            BleLog.add(address, "onConnectionStateChange state=$newState status=$status")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 connected = true
                 connectWait.complete(Unit)
@@ -285,12 +285,12 @@ class AerClient(context: Context, val address: String) {
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
-            BleLog.add("onMtuChanged mtu=$mtu status=$status")
+            BleLog.add(address, "onMtuChanged mtu=$mtu status=$status")
             mtuWait?.complete(if (status == BluetoothGatt.GATT_SUCCESS) mtu else null)
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            BleLog.add("onCharacteristicWrite ${c.uuid} status=$status")
+            BleLog.add(address, "onCharacteristicWrite ${c.uuid} status=$status")
             writeWait?.complete(status)
         }
 
@@ -313,7 +313,7 @@ class AerClient(context: Context, val address: String) {
 
         /** Reassembles fragmented replies until a whole CBOR item decodes. */
         private fun onData(uuid: UUID, value: ByteArray) {
-            BleLog.add("notify $uuid ${value.toHex()}")
+            BleLog.add(address, "notify $uuid ${value.toHex()}")
             val now = SystemClock.elapsedRealtime()
             lastActivity = now
             val buf = buffers.getOrPut(uuid) { ByteArrayOutputStream() }
@@ -321,7 +321,7 @@ class AerClient(context: Context, val address: String) {
             lastData[uuid] = now
             buf.write(value)
             if (buf.size() > MAX_REPLY_BYTES) {
-                BleLog.add("dropping oversized reply")
+                BleLog.add(address, "dropping oversized reply")
                 buf.reset()
                 return
             }
@@ -331,7 +331,7 @@ class AerClient(context: Context, val address: String) {
             } catch (_: Cbor.Incomplete) {
                 return
             } catch (e: Cbor.Malformed) {
-                BleLog.add("bad reply ${data.toHex()}: ${e.message}")
+                BleLog.add(address, "bad reply ${data.toHex()}: ${e.message}")
                 buf.reset()
                 return
             }

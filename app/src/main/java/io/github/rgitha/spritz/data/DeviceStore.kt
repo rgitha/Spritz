@@ -10,6 +10,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import io.github.rgitha.spritz.protocol.DeviceStatus
 import io.github.rgitha.spritz.protocol.Refill
+import io.github.rgitha.spritz.protocol.Schedule
+import io.github.rgitha.spritz.protocol.hexToBytes
+import io.github.rgitha.spritz.protocol.toHex
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -31,6 +34,11 @@ data class SavedDevice(
     val refillBaseline: Long = 0,
     val lowRefillNotified: Boolean = false,
     val lowBatteryNotified: Boolean = false,
+    /** The device's schedules as last read or saved; null if never. */
+    val schedules: List<Schedule>? = null,
+    /** When [schedules] was last read from the device. */
+    val schedulesAt: Long = 0,
+    val battery: BatteryHistory = BatteryHistory(),
 ) {
     val refillPercent: Int? get() = status?.let { Refill.percent(it.totalSprays, refillBaseline) }
 
@@ -47,14 +55,11 @@ data class Settings(
     val notifyLowRefill: Boolean = true,
     val notifyLowBattery: Boolean = true,
     val notifyScheduleStart: Boolean = true,
-    /** The device the widget sprays; null means the first one. */
+    /** The device widgets placed before each had its own device spray; null means the first. */
     val widgetDevice: String? = null,
     /** The device shown when the app opens. */
     val lastDevice: String? = null,
 )
-
-/** The widget's last result, shown under its button. */
-data class WidgetState(val text: String = "", val at: Long = 0, val busy: Boolean = false)
 
 private val Context.store: DataStore<Preferences> by preferencesDataStore("spritz")
 
@@ -74,22 +79,11 @@ class DeviceStore(context: Context) {
         )
     }
 
-    val widgetState: Flow<WidgetState> = ds.data.map {
-        WidgetState(it[W_TEXT] ?: "", it[W_AT]?.toLongOrNull() ?: 0, it[W_BUSY] ?: false)
-    }
-
     fun device(address: String): Flow<SavedDevice?> = devices.map { l -> l.find { it.address == address } }
 
     suspend fun devicesNow() = devices.first()
 
     suspend fun settingsNow() = settings.first()
-
-    /** The device the widget controls. */
-    suspend fun widgetDevice(): SavedDevice? {
-        val list = devicesNow()
-        val chosen = settingsNow().widgetDevice
-        return list.find { it.address == chosen } ?: list.firstOrNull()
-    }
 
     suspend fun add(address: String, name: String, room: String?) = updateDevices { list ->
         if (list.any { it.address == address }) list
@@ -126,14 +120,6 @@ class DeviceStore(context: Context) {
         }
     }
 
-    suspend fun setWidgetState(state: WidgetState) {
-        ds.edit {
-            it[W_TEXT] = state.text
-            it[W_AT] = state.at.toString()
-            it[W_BUSY] = state.busy
-        }
-    }
-
     private suspend fun updateDevices(change: (List<SavedDevice>) -> List<SavedDevice>) {
         ds.edit { it[DEVICES] = encodeDevices(change(decodeDevices(it[DEVICES]))) }
     }
@@ -151,9 +137,6 @@ class DeviceStore(context: Context) {
         private val N_SCHEDULE = booleanPreferencesKey("notify_schedule")
         private val WIDGET_DEVICE = stringPreferencesKey("widget_device")
         private val LAST_DEVICE = stringPreferencesKey("last_device")
-        private val W_TEXT = stringPreferencesKey("widget_text")
-        private val W_AT = stringPreferencesKey("widget_at")
-        private val W_BUSY = booleanPreferencesKey("widget_busy")
 
         @Volatile private var instance: DeviceStore? = null
 
@@ -172,6 +155,12 @@ class DeviceStore(context: Context) {
                     put("lowRefillNotified", d.lowRefillNotified)
                     put("lowBatteryNotified", d.lowBatteryNotified)
                     d.status?.let { put("status", encodeStatus(it)) }
+                    d.schedules?.let { list -> put("schedules", JSONArray(list.map { it.toBytes().toHex() })) }
+                    put("schedulesAt", d.schedulesAt)
+                    put("battery", JSONObject().apply {
+                        d.battery.replacedAt?.let { put("replacedAt", it) }
+                        put("points", JSONArray(d.battery.points.map { JSONArray(listOf(it.at, it.mv)) }))
+                    })
                 })
             }
         }.toString()
@@ -191,8 +180,22 @@ class DeviceStore(context: Context) {
                     refillBaseline = o.optLong("refillBaseline"),
                     lowRefillNotified = o.optBoolean("lowRefillNotified"),
                     lowBatteryNotified = o.optBoolean("lowBatteryNotified"),
+                    schedules = o.optJSONArray("schedules")?.let { a ->
+                        (0 until a.length()).mapNotNull { Schedule.fromBytes(a.getString(it).hexToBytes()) }
+                    },
+                    schedulesAt = o.optLong("schedulesAt"),
+                    battery = o.optJSONObject("battery")?.let(::decodeBattery) ?: BatteryHistory(),
                 )
             }
+        }
+
+        private fun decodeBattery(o: JSONObject): BatteryHistory {
+            val a = o.optJSONArray("points") ?: JSONArray()
+            val points = (0 until a.length()).map { i ->
+                val p = a.getJSONArray(i)
+                BatteryPoint(p.getLong(0), p.getInt(1))
+            }
+            return BatteryHistory(points, if (o.has("replacedAt")) o.getLong("replacedAt") else null)
         }
 
         private fun encodeStatus(s: DeviceStatus) = JSONObject().apply {
