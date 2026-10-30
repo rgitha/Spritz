@@ -33,7 +33,10 @@ import androidx.glance.appwidget.state.updateAppWidgetState
 import androidx.glance.appwidget.updateAll
 import androidx.glance.background
 import androidx.glance.currentState
+import androidx.glance.LocalSize
+import androidx.glance.appwidget.SizeMode
 import androidx.glance.layout.Alignment
+import androidx.glance.layout.Box
 import androidx.glance.layout.Column
 import androidx.glance.layout.Row
 import androidx.glance.layout.Spacer
@@ -44,7 +47,6 @@ import androidx.glance.layout.size
 import androidx.glance.layout.width
 import androidx.glance.state.GlanceStateDefinition
 import androidx.glance.state.PreferencesGlanceStateDefinition
-import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextAlign
 import androidx.glance.text.TextStyle
@@ -61,6 +63,9 @@ import io.github.rgitha.spritz.work.SprayWorker
 class SprayWidget : GlanceAppWidget() {
 
     override val stateDefinition: GlanceStateDefinition<*> = PreferencesGlanceStateDefinition
+
+    // The real size, so the layout can change as the widget is resized.
+    override val sizeMode: SizeMode = SizeMode.Exact
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val store = DeviceStore.get(context)
@@ -88,67 +93,76 @@ class SprayWidget : GlanceAppWidget() {
     @Composable
     private fun Content(device: SavedDevice, prefs: Preferences) {
         val outcome = outcomeOf(prefs)
-        Column(
-            modifier = GlanceModifier
-                .fillMaxSize()
-                .cornerRadius(24.dp)
-                .background(GlanceTheme.colors.primaryContainer)
-                .clickable(actionRunCallback<SprayAction>())
-                .padding(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // "Spray" and the device stay put; a small mark beside "Spray" shows
-            // progress, then a tick or cross, as in the app.
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        // A failure's short reason stands in for the device while the cross shows.
+        val error = prefs[ERROR].takeIf { outcome == FAILED }
+        val labelColor = if (error != null) GlanceTheme.colors.error else GlanceTheme.colors.onPrimaryContainer
+        val base = GlanceModifier
+            .fillMaxSize()
+            .cornerRadius(24.dp)
+            .background(GlanceTheme.colors.primaryContainer)
+            .clickable(actionRunCallback<SprayAction>())
+        // Wider than a cell: the name goes beside the icon. Otherwise the icon sits at
+        // the top, so the name gets the rest.
+        if (LocalSize.current.width >= WIDE) {
+            Row(base.padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                SprayIcon(outcome)
+                Spacer(GlanceModifier.width(10.dp))
+                Text(error ?: device.label, maxLines = 2, style = TextStyle(color = labelColor, fontSize = 12.sp))
+            }
+        } else {
+            Column(
+                base.padding(start = 6.dp, end = 6.dp, top = 8.dp, bottom = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalAlignment = Alignment.Top,
+            ) {
+                SprayIcon(outcome)
+                Spacer(GlanceModifier.height(2.dp))
                 Text(
-                    "Spray",
-                    style = TextStyle(
-                        color = GlanceTheme.colors.onPrimaryContainer,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                    ),
+                    error ?: device.label,
+                    maxLines = 3,
+                    style = TextStyle(color = labelColor, fontSize = 10.sp, textAlign = TextAlign.Center),
                 )
-                when (outcome) {
-                    RUNNING -> {
-                        Spacer(GlanceModifier.width(4.dp))
-                        CircularProgressIndicator(
-                            modifier = GlanceModifier.size(12.dp),
-                            color = GlanceTheme.colors.onPrimaryContainer,
-                        )
-                    }
-                    OK -> {
-                        Spacer(GlanceModifier.width(4.dp))
+            }
+        }
+    }
+
+    /** The spray icon; faded under a spinner while spraying, then a tick or cross on its corner, both alike. */
+    @Composable
+    private fun SprayIcon(outcome: String?) {
+        Box(GlanceModifier.size(50.dp, 34.dp), contentAlignment = Alignment.Center) {
+            Image(
+                ImageProvider(R.drawable.ic_spray),
+                contentDescription = "Spray",
+                colorFilter = ColorFilter.tint(
+                    if (outcome == RUNNING) GlanceTheme.colors.outline else GlanceTheme.colors.onPrimaryContainer,
+                ),
+                modifier = GlanceModifier.size(44.dp, 30.dp),
+            )
+            if (outcome == RUNNING) {
+                CircularProgressIndicator(
+                    modifier = GlanceModifier.size(30.dp),
+                    color = GlanceTheme.colors.onPrimaryContainer,
+                )
+            }
+            if (outcome == OK || outcome == FAILED) {
+                val ok = outcome == OK
+                Box(GlanceModifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
+                    Box(
+                        GlanceModifier
+                            .size(14.dp)
+                            .cornerRadius(7.dp)
+                            .background(GlanceTheme.colors.onPrimaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
                         Image(
-                            ImageProvider(R.drawable.ic_widget_check),
-                            contentDescription = "Sprayed",
-                            colorFilter = ColorFilter.tint(GlanceTheme.colors.onPrimaryContainer),
-                            modifier = GlanceModifier.size(12.dp),
-                        )
-                    }
-                    FAILED -> {
-                        Spacer(GlanceModifier.width(4.dp))
-                        Image(
-                            ImageProvider(R.drawable.ic_widget_close),
-                            contentDescription = "Spray failed",
-                            colorFilter = ColorFilter.tint(GlanceTheme.colors.error),
-                            modifier = GlanceModifier.size(12.dp),
+                            ImageProvider(if (ok) R.drawable.ic_widget_check else R.drawable.ic_widget_close),
+                            contentDescription = if (ok) "Sprayed" else "Spray failed",
+                            colorFilter = ColorFilter.tint(GlanceTheme.colors.primaryContainer),
+                            modifier = GlanceModifier.size(10.dp),
                         )
                     }
                 }
             }
-            Spacer(GlanceModifier.height(4.dp))
-            // A failure's short reason stands in for the device while the cross shows.
-            val error = prefs[ERROR].takeIf { outcome == FAILED }
-            Text(
-                error ?: device.label,
-                maxLines = 2,
-                style = TextStyle(
-                    color = if (error != null) GlanceTheme.colors.error else GlanceTheme.colors.onPrimaryContainer,
-                    fontSize = 10.sp,
-                    textAlign = TextAlign.Center,
-                ),
-            )
         }
     }
 
@@ -183,6 +197,9 @@ class SprayWidget : GlanceAppWidget() {
         const val RUNNING = "running"
         const val OK = "ok"
         const val FAILED = "failed"
+
+        /** From this width the name goes beside the icon: about two cells. */
+        private val WIDE = 110.dp
 
         /** How long the tick or cross stays. */
         const val RESULT_MS = 3_000L

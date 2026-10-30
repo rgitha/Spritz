@@ -9,7 +9,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -71,11 +70,7 @@ fun OutcomeMark(outcome: Outcome?, modifier: Modifier = Modifier) {
             color = LocalContentColor.current,
         )
         Outcome.OK -> Icon(Icons.Default.Check, contentDescription = "Done", modifier = modifier.size(18.dp))
-        Outcome.FAILED -> Icon(
-            Icons.Default.Close,
-            contentDescription = "Failed",
-            tint = MaterialTheme.colorScheme.error,
-            modifier = modifier.size(18.dp),
-        )
+        // In the content colour, like the tick: red barely shows on a filled button.
+        Outcome.FAILED -> Icon(Icons.Default.Close, contentDescription = "Failed", modifier = modifier.size(18.dp))
     }
 }

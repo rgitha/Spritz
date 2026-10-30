@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDateTime
 import java.util.concurrent.ConcurrentHashMap
 
@@ -102,21 +103,41 @@ class SpritzRepository private constructor(private val context: Context) {
     }
 
     /** Renames or moves a device in the background, so leaving a screen can't cut it short. */
-    fun editDevice(address: String, name: String, room: String?) {
-        scope.launch { store.edit(address, name, room) }
+    /** Adds a device and opens it; widgets still tied to it from before pick it up again. */
+    suspend fun addDevice(address: String, name: String, room: String?) {
+        store.add(address, name, room)
+        store.updateSettings { it.copy(lastDevice = address) }
+        scope.launch { SprayWidget.refresh(context) }
     }
 
-    suspend fun removeDevice(address: String) {
-        AerClients.remove(address)
-        store.remove(address)
-        store.updateSettings {
-            it.copy(
-                widgetDevice = it.widgetDevice.takeIf { a -> a != address },
-                lastDevice = it.lastDevice.takeIf { a -> a != address },
-            )
+    fun editDevice(address: String, name: String, room: String?) {
+        scope.launch {
+            store.edit(address, name, room)
+            // Widgets show the room and name.
+            SprayWidget.refresh(context)
         }
-        // Its widgets now say it was removed.
-        SprayWidget.refresh(context)
+    }
+
+    /**
+     * Removes a device, then calls [onRemoved] on the main thread. Runs here rather than
+     * in the screen's scope: the screen leaves as soon as the device does, which would
+     * cancel the rest.
+     */
+    fun removeDevice(address: String, onRemoved: () -> Unit) {
+        scope.launch {
+            AerClients.remove(address)
+            store.remove(address)
+            Notifier.cancelAll(context, address)
+            store.updateSettings {
+                it.copy(
+                    widgetDevice = it.widgetDevice.takeIf { a -> a != address },
+                    lastDevice = it.lastDevice.takeIf { a -> a != address },
+                )
+            }
+            withContext(Dispatchers.Main) { onRemoved() }
+            // Its widgets now say it was removed.
+            SprayWidget.refresh(context)
+        }
     }
 
     private suspend fun record(address: String, status: DeviceStatus): DeviceStatus {

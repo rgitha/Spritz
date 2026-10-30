@@ -188,9 +188,8 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
             onConfirm = { name, room ->
                 settingUp = null
                 scope.launch {
-                    store.add(d.address, name, room)
+                    repo.addDevice(d.address, name, room)
                     repo.adopt(d.address)
-                    store.updateSettings { it.copy(lastDevice = d.address) }
                     // Stay while there are more to add; the search starts again by itself.
                     val savedNow = store.devicesNow().map { it.address }.toSet()
                     if (found.all { it.address in savedNow }) {

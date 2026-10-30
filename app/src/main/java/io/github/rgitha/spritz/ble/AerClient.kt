@@ -190,15 +190,29 @@ class AerClient(context: Context, val address: String) {
             BleLog.add(address, "✗ Can't connect: Bluetooth is off")
             throw AerException("Bluetooth is off", AerException.Kind.BLUETOOTH_OFF)
         }
-        val l = Link(adapter.getRemoteDevice(address))
-        try {
-            l.open()
-        } catch (e: Exception) {
-            BleLog.add(address, "✗ Couldn't connect: ${(e as? AerException)?.message ?: "Bluetooth error"}")
-            l.close(log = false)
-            throw e
+        var retried = false
+        while (true) {
+            val l = Link(adapter.getRemoteDevice(address))
+            try {
+                l.open()
+                return l
+            } catch (e: Exception) {
+                // Read before closing: closing can report a drop of its own.
+                val dropped = l.dropStatus
+                l.close(log = false)
+                // Android often drops a new link at once (status 133 or 62), mostly soon after
+                // an earlier one closed; a second try usually works.
+                if (dropped != null && !retried && e !is CancellationException) {
+                    BleLog.add(address, "Connection dropped (status $dropped), retrying")
+                    retried = true
+                    delay(RETRY_DELAY_MS)
+                    continue
+                }
+                val reason = (e as? AerException)?.message ?: "Bluetooth error"
+                BleLog.add(address, "✗ Couldn't connect: $reason" + (dropped?.let { " (status $it)" } ?: ""))
+                throw e
+            }
         }
-        return l
     }
 
     private fun Reply.requireOk(): Reply {
@@ -212,6 +226,9 @@ class AerClient(context: Context, val address: String) {
         @Volatile var connected = false
             private set
         var timeSet = false
+        /** The status Android gave when the link dropped before it was ready; null if it didn't. */
+        @Volatile var dropStatus: Int? = null
+        private var ready = false
         private var connectedAt = 0L
         /** Last write or notification, for the idle disconnect. */
         @Volatile var lastActivity = 0L
@@ -253,6 +270,7 @@ class AerClient(context: Context, val address: String) {
             if (!g.setCharacteristicNotification(notify, true)) throw AerException("Couldn't subscribe")
             connectedAt = SystemClock.elapsedRealtime()
             lastActivity = connectedAt
+            ready = true
             BleLog.add(address, "Connected")
         }
 
@@ -334,6 +352,7 @@ class AerClient(context: Context, val address: String) {
                 connectWait.complete(Unit)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connected = false
+                if (!ready) dropStatus = status
                 val err = AerException("Device disconnected", AerException.Kind.NO_REPLY)
                 connectWait.completeExceptionally(err)
                 discoverWait.completeExceptionally(err)
@@ -426,6 +445,8 @@ class AerClient(context: Context, val address: String) {
         /** The ~99-byte status reply plus 3 bytes of ATT overhead, with a little room. */
         const val MIN_MTU = 104
         const val CONNECT_TIMEOUT_MS = 5_000L
+        /** The pause before the one retry of a connection Android dropped. */
+        const val RETRY_DELAY_MS = 500L
         const val DISCOVER_TIMEOUT_MS = 5_000L
         const val REPLY_TIMEOUT_MS = 5_000L
         const val STATUS_DELAY_MS = 2_000L

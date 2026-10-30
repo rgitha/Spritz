@@ -31,11 +31,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -45,7 +45,6 @@ import io.github.rgitha.spritz.data.SavedDevice
 import io.github.rgitha.spritz.data.SpritzRepository
 import io.github.rgitha.spritz.widget.PinnedWidgetReceiver
 import io.github.rgitha.spritz.widget.SprayWidgetReceiver
-import kotlinx.coroutines.launch
 
 /**
  * One device's name and room, widget, info, connection log and removal. Name and
@@ -63,13 +62,16 @@ fun DeviceSettingsScreen(
     val repo = remember { SpritzRepository.get(context) }
     val devices by repo.store.devices.collectAsState(initial = null)
     val list = devices ?: return
-    val d = list.find { it.address == address } ?: return
+    // Kept after removal, so the screen stays drawn until it closes.
+    val shown = remember { mutableStateOf<SavedDevice?>(null) }
+    val found = list.find { it.address == address }
+    if (found != null) SideEffect { shown.value = found }
+    val d = found ?: shown.value ?: return
     val others = list.filter { it.address != address }
 
     var name by remember { mutableStateOf(d.name) }
     var room by remember { mutableStateOf(d.room) }
     var removing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
 
     // Save on the way out; an empty name keeps the old one.
     val latest by rememberUpdatedState(Triple(name, room, d))
@@ -120,10 +122,8 @@ fun DeviceSettingsScreen(
             text = { Text("ID ${d.address}. Schedules stay on the device and keep running. You can add it again later.") },
             confirmButton = {
                 TextButton(onClick = {
-                    scope.launch {
-                        repo.removeDevice(address)
-                        onRemoved(Removed(d.displayName, d.address))
-                    }
+                    val r = Removed(d.displayName, d.address)
+                    repo.removeDevice(address) { onRemoved(r) }
                 }) { Text("Remove") }
             },
             dismissButton = { TextButton(onClick = { removing = false }) { Text("Cancel") } },

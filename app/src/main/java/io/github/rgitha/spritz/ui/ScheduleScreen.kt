@@ -29,16 +29,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -70,13 +67,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.rgitha.spritz.data.SavedDevice
 import io.github.rgitha.spritz.data.SpritzRepository
 import io.github.rgitha.spritz.protocol.INTERVALS
 import io.github.rgitha.spritz.protocol.Schedule
+import io.github.rgitha.spritz.protocol.StopTarget
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.time.DayOfWeek
 import java.time.format.TextStyle
@@ -91,8 +91,15 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
     val dirty = MutableStateFlow(false)
     val loading = MutableStateFlow(false)
     val commands = Commands(viewModelScope, app)
+    val device = repo.store.device(address)
 
     init { load() }
+
+    /** The schedule the device is running now, if any, from its last status. */
+    fun running(d: SavedDevice?): Schedule? = d?.let { repo.runningSchedule(it) }
+
+    /** Skips the rest of the current run; the device ignores this outside a run. */
+    fun skipRun() = commands.run(KEY_SKIP) { repo.stopRun(address, StopTarget.CURRENT_RUN) }
 
     fun load() {
         if (loading.value) return
@@ -135,6 +142,7 @@ class ScheduleViewModel(app: Application, val address: String) : AndroidViewMode
 
     companion object {
         const val KEY_SAVE = "save"
+        const val KEY_SKIP = "skip"
     }
 }
 
@@ -147,6 +155,8 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
     val dirty by vm.dirty.collectAsState()
     val loading by vm.loading.collectAsState()
     val outcomes by vm.commands.outcomes.collectAsState()
+    val device by vm.device.collectAsState(initial = null)
+    val running = vm.running(device)
 
     /** null: closed; -1: new schedule; otherwise the index being edited. */
     var editing by remember { mutableStateOf<Int?>(null) }
@@ -158,7 +168,25 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Schedules") },
+                title = {
+                    Column {
+                        Text("Schedules")
+                        // Which device, and how much room it has left.
+                        val subtitle = listOfNotNull(
+                            device?.label,
+                            list?.let { "${it.size} of ${Schedule.MAX} used" },
+                        ).joinToString(" · ")
+                        if (subtitle.isNotEmpty()) {
+                            Text(
+                                subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                },
                 navigationIcon = { BackButton(back) },
             )
         },
@@ -180,27 +208,45 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
         Column(Modifier.padding(padding)) {
             val l = list
             when {
-                l == null && loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+                l == null && loading -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = gap) {
+                        CircularProgressIndicator()
+                        Text("Reading schedules from the device…", textAlign = TextAlign.Center)
+                        Text(
+                            "This takes a few seconds.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 l == null -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = gap) {
-                        Text("Couldn't read the schedules.")
+                        Text(
+                            "Couldn't read the schedules from the device. Make sure it's nearby, then try again.",
+                            textAlign = TextAlign.Center,
+                        )
                         Button(onClick = vm::load) { Text("Try again") }
                     }
                 }
-                l.isEmpty() -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        "No schedules. Add one to spray on set days and times; all schedules run together.",
-                        textAlign = TextAlign.Center,
-                    )
+                l.isEmpty() -> Column(Modifier.padding(16.dp, 8.dp)) {
+                    StoredNote()
+                    Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                        Text("No schedules yet. Add one to spray on set days and times.", textAlign = TextAlign.Center)
+                    }
                 }
                 else -> LazyColumn(
                     contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp),
                     verticalArrangement = gap,
                 ) {
+                    item { StoredNote() }
                     itemsIndexed(l) { i, s ->
-                        ScheduleItem(s, onEdit = { editing = i }, onDelete = { vm.delete(i) })
+                        ScheduleItem(
+                            s,
+                            running = s == running,
+                            skipOutcome = outcomes[ScheduleViewModel.KEY_SKIP],
+                            onSkip = vm::skipRun,
+                            onEdit = { editing = i },
+                        )
                     }
                 }
             }
@@ -214,6 +260,7 @@ fun ScheduleScreen(address: String, onBack: () -> Unit) {
             others = list.orEmpty().filterIndexed { i, _ -> i != index },
             onDismiss = { editing = null },
             onDone = { vm.put(if (index >= 0) index else null, it); editing = null },
+            onDelete = if (index >= 0) ({ vm.delete(index); editing = null }) else null,
         )
     }
     if (confirmLeave) {
@@ -235,7 +282,11 @@ private fun SaveBar(dirty: Boolean, outcome: Outcome?, onSave: () -> Unit) {
             modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Text(
-                if (dirty) "Not saved to device" else "Saved to device",
+                when {
+                    outcome == Outcome.RUNNING -> "Saving to device…"
+                    dirty -> "Not saved to device"
+                    else -> "Saved to device"
+                },
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.weight(1f),
             )
@@ -250,35 +301,68 @@ private fun SaveBar(dirty: Boolean, outcome: Outcome?, onSave: () -> Unit) {
     }
 }
 
-/** Time range over interval on the left; the week on the right, so rows line up. */
+/** Where schedules live, so it's clear they don't need the phone. */
 @Composable
-private fun ScheduleItem(s: Schedule, onEdit: () -> Unit, onDelete: () -> Unit) {
-    var menu by remember { mutableStateOf(false) }
+private fun StoredNote() {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 4.dp)) {
+        Icon(
+            Icons.Default.Info,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Stored on the device: they run even when your phone is away.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Time range over interval on the left; the week on the right, so rows line up.
+ * The one running now is outlined, with a way to skip the rest of its run.
+ */
+@Composable
+private fun ScheduleItem(s: Schedule, running: Boolean, skipOutcome: Outcome?, onSkip: () -> Unit, onEdit: () -> Unit) {
     val clock = rememberClock()
-    Card(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
-        ) {
-            Column(Modifier.weight(1f)) {
-                // Breaks only after the dash when a 12-hour range doesn't fit on one line.
-                Text(
-                    "${clock(s.startMinute).unbroken()}\u00A0– ${clock(s.displayEndMinute).unbroken()}",
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    "${s.interval} min",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    Card(
+        onClick = onEdit,
+        border = if (running) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    // Breaks only after the dash when a 12-hour range doesn't fit on one line.
+                    Text(
+                        "${clock(s.startMinute).unbroken()}\u00A0– ${clock(s.displayEndMinute).unbroken()}",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        "${s.interval} min",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                WeekDots(s.dayMask)
             }
-            Spacer(Modifier.width(8.dp))
-            WeekDots(s.dayMask)
-            Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; onEdit() })
-                    DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete() })
+            if (running) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Running now",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier
+                            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    OutlinedButton(onClick = onSkip, enabled = skipOutcome != Outcome.RUNNING) {
+                        LabelWithMark("Skip this run", skipOutcome)
+                    }
                 }
             }
         }
@@ -360,15 +444,19 @@ private fun ShortcutChip(label: String, selected: Boolean, onClick: () -> Unit) 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ScheduleEditor(initial: Schedule?, others: List<Schedule>, onDismiss: () -> Unit, onDone: (Schedule) -> Unit) {
+private fun ScheduleEditor(
+    initial: Schedule?,
+    others: List<Schedule>,
+    onDismiss: () -> Unit,
+    onDone: (Schedule) -> Unit,
+    /** Null for a new schedule. */
+    onDelete: (() -> Unit)?,
+) {
     var days by remember { mutableIntStateOf(initial?.dayMask ?: 0x7F) }
     val clock = rememberClock()
     val is24 = android.text.format.DateFormat.is24HourFormat(LocalContext.current)
-    // A new schedule starts on the first time preset that's free on every day.
-    val preset = remember {
-        TIME_PRESETS.firstOrNull { Schedule.windowErrors(0x7F, it.start, it.end, 20, others, clock).isEmpty() }
-            ?: TIME_PRESETS.first()
-    }
+    // A new schedule starts on the morning preset.
+    val preset = TIME_PRESETS.first()
     val initialStart = initial?.startMinute ?: preset.start
     val start = rememberTimePickerState(initialStart / 60, initialStart % 60, is24Hour = is24)
     // The device stores a spray count; editing shows the end it works out to.
@@ -453,6 +541,12 @@ private fun ScheduleEditor(initial: Schedule?, others: List<Schedule>, onDismiss
                 }
                 errors.forEach {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                // Like the other edits, it reaches the device with Save.
+                if (onDelete != null) {
+                    TextButton(onClick = onDelete) {
+                        Text("Delete schedule", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         },

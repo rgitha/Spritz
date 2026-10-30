@@ -96,16 +96,46 @@ object Notifier {
                 ", ${clockText(context, it.startMinute)} to ${clockText(context, it.displayEndMinute)}"
             } ?: ""
             post(context, after, KIND_SCHEDULE, CHANNEL_SCHEDULE, "Schedule started: ${after.label}",
-                "Spraying$every$window.")
+                "Spraying$every$window.", timeoutMs = running?.let { untilEnd(it) })
+        } else if (wasScheduled && mode.source != ModeSource.SCHEDULE) {
+            // Skipped, ended or stopped: the notice no longer holds.
+            cancel(context, after.address, KIND_SCHEDULE)
         }
         return result
+    }
+
+    /** Clears every notification for a device, as when it's removed. */
+    fun cancelAll(context: Context, address: String) {
+        listOf(KIND_REFILL, KIND_BATTERY, KIND_SCHEDULE).forEach { cancel(context, address, it) }
+    }
+
+    private fun cancel(context: Context, address: String, kind: Int) =
+        NotificationManagerCompat.from(context).cancel(notificationId(address, kind))
+
+    private fun notificationId(address: String, kind: Int) = address.hashCode() * 8 + kind
+
+    /** Time left until a minute after [s]'s last spray today; null if that's already past. */
+    private fun untilEnd(s: Schedule): Long? {
+        val end = java.time.LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault())
+            .plusMinutes(s.displayEndMinute.toLong() + 1)
+            .toInstant().toEpochMilli()
+        return (end - System.currentTimeMillis()).takeIf { it > 0 }
     }
 
     private const val KIND_REFILL = 1
     private const val KIND_BATTERY = 2
     private const val KIND_SCHEDULE = 3
 
-    private fun post(context: Context, device: SavedDevice, kind: Int, channel: String, title: String, text: String) {
+    /** [timeoutMs], if given, is when Android removes the notification by itself. */
+    private fun post(
+        context: Context,
+        device: SavedDevice,
+        kind: Int,
+        channel: String,
+        title: String,
+        text: String,
+        timeoutMs: Long? = null,
+    ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -113,7 +143,7 @@ object Notifier {
         val intent = Intent(context, MainActivity::class.java)
             .putExtra(MainActivity.EXTRA_DEVICE, device.address)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        val id = device.address.hashCode() * 8 + kind
+        val id = notificationId(device.address, kind)
         val pi = PendingIntent.getActivity(
             context, id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -124,6 +154,7 @@ object Notifier {
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(pi)
             .setAutoCancel(true)
+            .apply { timeoutMs?.let { setTimeoutAfter(it) } }
             .build()
         NotificationManagerCompat.from(context).notify(id, n)
     }

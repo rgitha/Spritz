@@ -60,6 +60,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.painterResource
+import io.github.rgitha.spritz.R
 import io.github.rgitha.spritz.data.BatteryAge
 import io.github.rgitha.spritz.data.BatteryLog
 import io.github.rgitha.spritz.data.SavedDevice
@@ -109,12 +111,14 @@ fun DeviceBody(
         }
         StatusCard(d, age, onBattery = { battery = true }, onSprays = { sprays = true })
         Button(onClick = vm::spray, modifier = Modifier.fillMaxWidth().height(64.dp)) {
-            LabelWithMark(
-                "Spray now",
-                outcomes[DeviceViewModel.KEY_SPRAY],
-                MaterialTheme.typography.titleMedium,
-                steady = true,
-            )
+            // The widget's icon, so the two read as the same action.
+            Icon(painterResource(R.drawable.ic_spray), contentDescription = null, modifier = Modifier.size(35.dp, 24.dp))
+            Spacer(Modifier.width(10.dp))
+            Text("Spray now", style = MaterialTheme.typography.titleMedium)
+            // Room kept for the mark, so the label doesn't move when it appears.
+            Box(Modifier.width(MARK_SPACE), contentAlignment = Alignment.CenterEnd) {
+                OutcomeMark(outcomes[DeviceViewModel.KEY_SPRAY])
+            }
         }
         AutoCard(d, outcomes, running, onSet = vm::setAuto, onSkip = vm::skipScheduleRun)
         Card(Modifier.fillMaxWidth()) {
@@ -445,7 +449,7 @@ private fun BatterySheet(d: SavedDevice, age: BatteryAge, onDismiss: () -> Unit)
                 }
                 if (s?.batteryMv != null) {
                     Text(
-                        "Now ${s.batteryPercent}% · %.2f V".format(s.batteryMv / 1000.0),
+                        "Now ${s.batteryPercent}% · ${"%.2f".format(s.batteryMv / 1000.0)} V",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
