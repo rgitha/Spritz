@@ -13,12 +13,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import io.github.rgitha.spritz.ble.Presence
 import io.github.rgitha.spritz.data.DeviceStore
+import io.github.rgitha.spritz.data.SpritzRepository
 import io.github.rgitha.spritz.ui.AddDeviceScreen
 import io.github.rgitha.spritz.ui.DeviceSettingsScreen
 import io.github.rgitha.spritz.ui.Removed
@@ -27,6 +32,9 @@ import io.github.rgitha.spritz.ui.LogScreen
 import io.github.rgitha.spritz.ui.ScheduleScreen
 import io.github.rgitha.spritz.ui.SettingsScreen
 import io.github.rgitha.spritz.ui.theme.SpritzTheme
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -37,6 +45,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         if (savedInstanceState == null) openDevice.value = intent.getStringExtra(EXTRA_DEVICE)
+        // While in the foreground: listen for saved devices, and read the status of one
+        // that's heard after it failed or went stale.
+        val repo = SpritzRepository.get(this)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch { Presence.advertisements.collect { repo.onHeard(it) } }
+                Presence.run(
+                    this@MainActivity,
+                    repo.store.devices.map { list -> list.map { it.address }.toSet() }.distinctUntilChanged(),
+                )
+            }
+        }
         setContent {
             SpritzTheme {
                 val nav = rememberNavController()

@@ -39,6 +39,10 @@ data class SavedDevice(
     /** When [schedules] was last read from the device. */
     val schedulesAt: Long = 0,
     val battery: BatteryHistory = BatteryHistory(),
+    /** Whether the last read or command got its reply; null before the first. */
+    val exchangeOk: Boolean? = null,
+    /** When [exchangeOk] was set. */
+    val exchangeAt: Long = 0,
 ) {
     val refillPercent: Int? get() = status?.let { Refill.percent(it.totalSprays, refillBaseline) }
 
@@ -157,6 +161,8 @@ class DeviceStore(context: Context) {
                     d.status?.let { put("status", encodeStatus(it)) }
                     d.schedules?.let { list -> put("schedules", JSONArray(list.map { it.toBytes().toHex() })) }
                     put("schedulesAt", d.schedulesAt)
+                    d.exchangeOk?.let { put("exchangeOk", it) }
+                    put("exchangeAt", d.exchangeAt)
                     put("battery", JSONObject().apply {
                         d.battery.replacedAt?.let { put("replacedAt", it) }
                         put("points", JSONArray(d.battery.points.map { JSONArray(listOf(it.at, it.mv)) }))
@@ -185,6 +191,8 @@ class DeviceStore(context: Context) {
                     },
                     schedulesAt = o.optLong("schedulesAt"),
                     battery = o.optJSONObject("battery")?.let(::decodeBattery) ?: BatteryHistory(),
+                    exchangeOk = if (o.has("exchangeOk")) o.getBoolean("exchangeOk") else null,
+                    exchangeAt = o.optLong("exchangeAt"),
                 )
             }
         }

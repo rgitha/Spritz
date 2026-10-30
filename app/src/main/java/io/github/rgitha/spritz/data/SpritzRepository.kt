@@ -2,12 +2,16 @@ package io.github.rgitha.spritz.data
 
 import android.content.Context
 import io.github.rgitha.spritz.ble.AerClient
+import io.github.rgitha.spritz.ble.AerException
 import io.github.rgitha.spritz.ble.AerClients
+import io.github.rgitha.spritz.ble.Presence
+import io.github.rgitha.spritz.ble.RefusedException
 import io.github.rgitha.spritz.notify.Notifier
 import io.github.rgitha.spritz.protocol.DeviceStatus
 import io.github.rgitha.spritz.protocol.ModeSource
 import io.github.rgitha.spritz.protocol.Schedule
 import io.github.rgitha.spritz.widget.SprayWidget
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -38,7 +42,7 @@ class SpritzRepository private constructor(private val context: Context) {
     private fun read(address: String): Deferred<DeviceStatus> = synchronized(reads) {
         reads[address]?.takeIf { it.isActive } ?: scope.async {
             try {
-                val status = client(address).readStatus()
+                val status = exchange(address) { it.readStatus() }
                 if (store.devicesNow().none { it.address == address }) {
                     unsaved[address] = status to System.currentTimeMillis()
                     status
@@ -70,24 +74,24 @@ class SpritzRepository private constructor(private val context: Context) {
         store.update(address) { it.copy(statusAt = at) }
     }
 
-    suspend fun spray(address: String, interval: Int = 0) = record(address, client(address).spray(interval))
+    suspend fun spray(address: String, interval: Int = 0) = record(address, exchange(address) { it.spray(interval) })
 
-    suspend fun stopAuto(address: String) = record(address, client(address).stopAuto())
+    suspend fun stopAuto(address: String) = record(address, exchange(address) { it.stopAuto() })
 
-    suspend fun stopRun(address: String, run: Int) = record(address, client(address).stopRun(run))
+    suspend fun stopRun(address: String, run: Int) = record(address, exchange(address) { it.stopRun(run) })
 
     suspend fun refillReset(address: String): DeviceStatus {
-        val status = client(address).refillReset()
+        val status = exchange(address) { it.refillReset() }
         // Whether 105 zeroes the counters isn't known yet, so remember where they stood.
         store.update(address) { it.copy(refillBaseline = status.totalSprays, lowRefillNotified = false) }
         return record(address, status)
     }
 
     suspend fun readSchedules(address: String): List<Schedule> =
-        client(address).readSchedules().also { cacheSchedules(address, it) }
+        exchange(address) { it.readSchedules() }.also { cacheSchedules(address, it) }
 
     suspend fun writeSchedules(address: String, list: List<Schedule>) {
-        client(address).writeSchedules(list)
+        exchange(address) { it.writeSchedules(list) }
         cacheSchedules(address, list)
     }
 
@@ -102,7 +106,6 @@ class SpritzRepository private constructor(private val context: Context) {
         return Schedule.running(d.schedules.orEmpty(), now.dayOfWeek, now.hour * 60 + now.minute, mode.interval)
     }
 
-    /** Renames or moves a device in the background, so leaving a screen can't cut it short. */
     /** Adds a device and opens it; widgets still tied to it from before pick it up again. */
     suspend fun addDevice(address: String, name: String, room: String?) {
         store.add(address, name, room)
@@ -110,6 +113,7 @@ class SpritzRepository private constructor(private val context: Context) {
         scope.launch { SprayWidget.refresh(context) }
     }
 
+    /** Renames or moves a device in the background, so leaving a screen can't cut it short. */
     fun editDevice(address: String, name: String, room: String?) {
         scope.launch {
             store.edit(address, name, room)
@@ -140,6 +144,54 @@ class SpritzRepository private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * Runs [block] against the device and remembers whether it got its reply, for the
+     * connection status. A refusal is still a reply. Bluetooth being off or a missing
+     * permission is the phone's doing, so it leaves the record as it was.
+     */
+    private suspend fun <T> exchange(address: String, block: suspend (AerClient) -> T): T {
+        val result = try {
+            block(client(address))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: RefusedException) {
+            noteExchange(address, true)
+            throw e
+        } catch (e: Exception) {
+            val phoneSide = e is SecurityException ||
+                (e as? AerException)?.kind in setOf(AerException.Kind.BLUETOOTH_OFF, AerException.Kind.NO_PERMISSION)
+            if (!phoneSide) noteExchange(address, false)
+            throw e
+        }
+        noteExchange(address, true)
+        return result
+    }
+
+    private suspend fun noteExchange(address: String, ok: Boolean) {
+        // It doesn't advertise while connected, so an answer counts as being heard.
+        if (ok) Presence.markHeard(address)
+        store.update(address) { it.copy(exchangeOk = ok, exchangeAt = System.currentTimeMillis()) }
+    }
+
+    /**
+     * Called for each advertisement heard: reads the status at once if the last
+     * exchange failed or the status is older than the background check interval, so
+     * a device that comes back shows as connected by itself. At most once a minute.
+     */
+    fun onHeard(address: String) {
+        scope.launch {
+            val d = store.devicesNow().find { it.address == address } ?: return@launch
+            val now = System.currentTimeMillis()
+            val pollMs = (store.settingsNow().pollMinutes.takeIf { it > 0 } ?: 60) * 60_000L
+            if (d.exchangeOk != false && now - d.statusAt < pollMs) return@launch
+            if (now - (recoveredAt[address] ?: 0) < RECOVER_GAP_MS) return@launch
+            recoveredAt[address] = now
+            runCatching { refresh(address) }
+        }
+    }
+
+    private val recoveredAt = ConcurrentHashMap<String, Long>()
+
     private suspend fun record(address: String, status: DeviceStatus): DeviceStatus {
         val before = store.devicesNow().find { it.address == address } ?: return status
         val now = System.currentTimeMillis()
@@ -169,6 +221,9 @@ class SpritzRepository private constructor(private val context: Context) {
     companion object {
         /** How soon to read the schedule list again when it doesn't explain a running schedule. */
         private const val SCHEDULES_RECHECK_MS = 10 * 60_000L
+
+        /** The least time between automatic reads for one device. */
+        private const val RECOVER_GAP_MS = 60_000L
 
         /** A setup read older than this isn't worth keeping. */
         private const val ADOPT_MS = 60_000L

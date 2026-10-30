@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -258,18 +259,30 @@ fun DeviceName(d: SavedDevice, style: TextStyle, modifier: Modifier = Modifier) 
     }
 }
 
-/** The mode, then battery and refill as icons, each in a fixed width so rows line up. */
+/** The mode (or why the device can't be reached), then battery and refill as icons, each in a fixed width so rows line up. */
 @Composable
 private fun StatusLine(d: SavedDevice) {
     val s = d.status
     val style = MaterialTheme.typography.bodySmall
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    if (s == null) {
-        Text("Not read yet", style = style, color = muted)
-        return
-    }
+    val reach = rememberReach(d)
+    val btOn = bluetoothOn()
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(s.mode.shortLabel, style = style, color = muted, modifier = Modifier.width(72.dp))
+        Box(Modifier.width(84.dp)) {
+            when {
+                !bluetoothAllowed() -> Text("No Bluetooth", style = style, color = muted)
+                !btOn -> Text("Bluetooth off", style = style, color = muted)
+                reach == Reach.DISCONNECTED -> Text(
+                    "Disconnected",
+                    style = style,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                reach == Reach.UNKNOWN || s == null -> WaitingDots(muted, dot = 4.dp, modifier = Modifier.padding(vertical = 6.dp))
+                else -> Text(s.mode.shortLabel, style = style, color = muted)
+            }
+        }
+        if (s == null) return@Row
         val battery = if (d.batteryLow) MaterialTheme.colorScheme.error else muted
         Row(Modifier.width(56.dp), verticalAlignment = Alignment.CenterVertically) {
             BatteryIcon(

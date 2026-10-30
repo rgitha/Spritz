@@ -48,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -159,7 +160,7 @@ private fun StatusCard(d: SavedDevice, age: BatteryAge, onBattery: () -> Unit, o
     val s = d.status
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            StatusChip(s?.mode?.shortLabel ?: "Not read yet", active = s?.mode?.isIdle == false)
+            StatusPill(d)
             Row(Modifier.fillMaxWidth()) {
                 val battery = s?.batteryPercent
                 Level(
@@ -186,14 +187,41 @@ private fun StatusCard(d: SavedDevice, age: BatteryAge, onBattery: () -> Unit, o
 
 private fun sprayCount(d: SavedDevice, s: DeviceStatus) = (s.totalSprays - d.refillBaseline).coerceAtLeast(0)
 
+/**
+ * The device's state in one pill: its mode when it can be reached (all greens),
+ * otherwise why not (phone-side reasons first), or dots while that isn't known yet.
+ */
 @Composable
-private fun StatusChip(text: String, active: Boolean) {
-    val bg = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-    val fg = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    val dot = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.outline
+private fun StatusPill(d: SavedDevice) {
+    val colors = MaterialTheme.colorScheme
+    val reach = rememberReach(d)
+    val mode = d.status?.mode
+    val ask = rememberBluetoothAsk()
+    when {
+        // Tapping asks for the permission again.
+        !bluetoothAllowed() -> StatusChip(
+            "No Bluetooth",
+            colors.surfaceVariant,
+            colors.onSurfaceVariant,
+            colors.outline,
+            Modifier.clip(RoundedCornerShape(14.dp)).clickable(onClickLabel = "Allow Bluetooth", onClick = ask),
+        )
+        !bluetoothOn() -> StatusChip("Bluetooth off", colors.surfaceVariant, colors.onSurfaceVariant, colors.outline)
+        reach == Reach.DISCONNECTED -> StatusChip("Disconnected", colors.errorContainer, colors.onErrorContainer, colors.error)
+        reach == Reach.UNKNOWN || mode == null -> Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.height(28.dp).background(colors.surfaceVariant, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp),
+        ) { WaitingDots(colors.onSurfaceVariant) }
+        mode.isIdle -> StatusChip(mode.shortLabel, colors.primaryContainer, colors.onPrimaryContainer, colors.primary)
+        else -> StatusChip(mode.shortLabel, colors.primary, colors.onPrimary, colors.primaryContainer)
+    }
+}
+
+@Composable
+private fun StatusChip(text: String, bg: Color, fg: Color, dot: Color, modifier: Modifier = Modifier) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.height(28.dp).background(bg, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp),
+        modifier = modifier.height(28.dp).background(bg, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp),
     ) {
         Box(Modifier.size(8.dp).background(dot, CircleShape))
         Spacer(Modifier.width(6.dp))
