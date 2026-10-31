@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -60,6 +61,10 @@ fun rememberReach(d: SavedDevice): Reach {
     }
     return reach(d.exchangeOk, Presence.advertising(d.address, seen, since, now))
 }
+
+/** The dot that marks a disconnected device: the error red, lightened. */
+@Composable
+fun disconnectedDot(): Color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
 
 @Composable
 fun bluetoothOn(): Boolean = Presence.bluetoothOn.collectAsState().value

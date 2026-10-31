@@ -41,6 +41,9 @@ class StatusPollWorker(context: Context, params: WorkerParameters) : CoroutineWo
     }
 
     companion object {
+        /** The interval when background checks are on; the setting is only on or off. */
+        const val DEFAULT_MINUTES = 60
+
         private const val TAG = "StatusPoll"
         private const val NAME = "status-poll"
 

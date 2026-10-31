@@ -45,6 +45,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.foundation.Canvas
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.core.RepeatMode
@@ -107,9 +113,11 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
     // The search pauses while a device is being set up: searching slows a connection.
     /** Bumped by "Search again" to start a new search. */
     var scanRound by remember { mutableIntStateOf(0) }
+    /** The device being identified; the search pauses meanwhile, and other rows wait. */
+    var identifying by remember { mutableStateOf<String?>(null) }
     var scanning by remember { mutableStateOf(false) }
-    LaunchedEffect(hasPermission, btOn, settingUp == null, scanRound) {
-        if (!hasPermission || !btOn || settingUp != null) return@LaunchedEffect
+    LaunchedEffect(hasPermission, btOn, settingUp == null && identifying == null, scanRound) {
+        if (!hasPermission || !btOn || settingUp != null || identifying != null) return@LaunchedEffect
         scanError = null
         scanning = true
         try {
@@ -146,7 +154,7 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
                 }
 
                 else -> {
-                    SearchCard(searching = scanning || settingUp != null, onSearch = { scanRound++ })
+                    SearchCard(searching = scanning || settingUp != null || identifying != null, onSearch = { scanRound++ })
                     scanError?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                     if (found.isNotEmpty()) {
                         Text(
@@ -160,10 +168,17 @@ fun AddDeviceScreen(onBack: () -> Unit, onAdded: () -> Unit) {
                             found.forEachIndexed { i, d ->
                                 if (i > 0) HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                                 val added = saved.find { it.address == d.address }
+                                val identify: @Composable () -> Unit = {
+                                    IdentifyButton(
+                                        d.address,
+                                        enabled = identifying == null,
+                                        onActive = { on -> identifying = if (on) d.address else null },
+                                    )
+                                }
                                 if (added == null) {
-                                    FoundRow(d, onAdd = { settingUp = d })
+                                    FoundRow(d, identify, onAdd = { settingUp = d })
                                 } else {
-                                    AddedRow(d, added.label, highlight = d.address in justAdded)
+                                    AddedRow(d, added.label, identify, highlight = d.address in justAdded)
                                 }
                             }
                         }
@@ -273,52 +288,79 @@ private fun SearchPulse() {
 }
 
 @Composable
-private fun FoundRow(d: FoundDevice, onAdd: () -> Unit) {
+private fun FoundRow(d: FoundDevice, identify: @Composable () -> Unit, onAdd: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onAdd).padding(start = 16.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onAdd).padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(d.name, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                "${d.address} · ${signal(d.rssi)} signal",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            DeviceLine(d.rssi, d.address)
         }
-        Spacer(Modifier.width(12.dp))
+        identify()
         OutlinedButton(onClick = onAdd) { Text("Add") }
     }
 }
 
-/** A device already added: its room and name instead of the signal. [highlight] marks one added just now. */
+/** A device already added: its room and name after the ID. [highlight] marks one added just now. */
 @Composable
-private fun AddedRow(d: FoundDevice, label: String, highlight: Boolean) {
+private fun AddedRow(d: FoundDevice, label: String, identify: @Composable () -> Unit, highlight: Boolean) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .background(if (highlight) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else Color.Transparent)
-            .padding(16.dp),
+            .padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(d.name, style = MaterialTheme.typography.bodyLarge, color = muted)
-            Text("${d.address} · $label", style = MaterialTheme.typography.bodySmall, color = muted)
+            DeviceLine(d.rssi, "${d.address} · $label")
         }
-        Spacer(Modifier.width(12.dp))
+        identify()
         Text(
             "Added",
             style = MaterialTheme.typography.labelLarge,
             color = if (highlight) MaterialTheme.colorScheme.primary else muted,
+            modifier = Modifier.padding(horizontal = 12.dp),
         )
     }
 }
 
-private fun signal(rssi: Int) = when {
-    rssi >= -60 -> "strong"
-    rssi >= -80 -> "good"
-    else -> "weak"
+/** Signal bars, then [text]. */
+@Composable
+private fun DeviceLine(rssi: Int, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        SignalBars(rssi)
+        Spacer(Modifier.width(6.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Three bars: strong (-60 dBm or better), good (to -80 dBm) or weak. */
+@Composable
+private fun SignalBars(rssi: Int) {
+    val lit = when {
+        rssi >= -60 -> 3
+        rssi >= -80 -> 2
+        else -> 1
+    }
+    val on = MaterialTheme.colorScheme.primary
+    val off = MaterialTheme.colorScheme.outlineVariant
+    val label = listOf("Weak", "Good", "Strong")[lit - 1] + " signal"
+    Canvas(Modifier.size(16.dp, 14.dp).semantics { contentDescription = label }) {
+        val bar = size.width * 3 / 16
+        val step = size.width * 5 / 16
+        listOf(5f, 9f, 13f).forEachIndexed { i, h ->
+            val height = size.height * h / 14
+            drawRoundRect(
+                if (i < lit) on else off,
+                topLeft = Offset(size.width / 16 + i * step, size.height - height),
+                size = Size(bar, height),
+                cornerRadius = CornerRadius(bar / 3),
+            )
+        }
+    }
 }
 
 @Composable

@@ -16,6 +16,11 @@ class SpritzApp : Application() {
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
             val store = DeviceStore.get(this@SpritzApp)
             store.dedupeNames()
+            // Intervals other than hourly came from the old choice of interval; it's now just on or off.
+            val minutes = store.settingsNow().pollMinutes
+            if (minutes > 0 && minutes != StatusPollWorker.DEFAULT_MINUTES) {
+                store.updateSettings { it.copy(pollMinutes = StatusPollWorker.DEFAULT_MINUTES) }
+            }
             StatusPollWorker.schedule(this@SpritzApp, store.settingsNow().pollMinutes)
         }
     }

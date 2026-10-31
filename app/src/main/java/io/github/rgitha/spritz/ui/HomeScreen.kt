@@ -14,13 +14,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -223,9 +223,6 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    if (vm != null) {
-                        IconButton(onClick = vm::refresh) { Icon(Icons.Default.Refresh, contentDescription = "Refresh") }
-                    }
                     IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "App settings") }
                 },
             )
@@ -272,12 +269,11 @@ private fun StatusLine(d: SavedDevice) {
             when {
                 !bluetoothAllowed() -> Text("No Bluetooth", style = style, color = muted)
                 !btOn -> Text("Bluetooth off", style = style, color = muted)
-                reach == Reach.DISCONNECTED -> Text(
-                    "Disconnected",
-                    style = style,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                reach == Reach.DISCONNECTED -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(6.dp).background(disconnectedDot(), CircleShape))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Disconnected", style = style, color = muted)
+                }
                 reach == Reach.UNKNOWN || s == null -> WaitingDots(muted, dot = 4.dp, modifier = Modifier.padding(vertical = 6.dp))
                 else -> Text(s.mode.shortLabel, style = style, color = muted)
             }

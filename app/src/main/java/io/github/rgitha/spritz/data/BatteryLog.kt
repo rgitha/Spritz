@@ -20,7 +20,7 @@ data class BatteryAge(val days: Long, val exact: Boolean, val since: Long)
 
 object BatteryLog {
     /** A rise of more than this many points, ending at [NEW_MIN_PERCENT] or above, means new batteries. */
-    const val NEW_JUMP_PERCENT = 25
+    const val NEW_JUMP_PERCENT = 10
     const val NEW_MIN_PERCENT = 90
 
     /** About a year of daily readings. */

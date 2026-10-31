@@ -12,6 +12,7 @@ object MsgType {
     const val STATUS = 107
     const val REMOVE_SCHEDULES = 108
     const val READ_SCHEDULES = 109
+    const val LED_TEST = 113
 
     const val STATUS_REPLY = STATUS + 50
 
@@ -64,6 +65,9 @@ object Messages {
     }
 
     fun status(): ByteArray = frame(MsgType.STATUS)
+
+    /** Turns on all three interval lights, until the next mode command. */
+    fun ledTest(): ByteArray = frame(MsgType.LED_TEST)
 
     fun removeSchedules(): ByteArray = frame(MsgType.REMOVE_SCHEDULES)
 

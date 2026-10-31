@@ -1,11 +1,11 @@
 package io.github.rgitha.spritz.ui
 
 import android.content.Context
-import android.text.format.DateUtils
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import io.github.rgitha.spritz.ble.AerException
+import io.github.rgitha.spritz.ble.BusyException
 import io.github.rgitha.spritz.ble.RefusedException
 import io.github.rgitha.spritz.protocol.Schedule
 import java.time.DayOfWeek
@@ -44,15 +44,23 @@ fun Throwable.shortReason(): String = when (this) {
 
 fun Throwable.userMessage(): String = when (this) {
     is RefusedException -> "The device refused that"
+    is BusyException -> message ?: "The device is busy"
     is AerException -> message ?: "Couldn't reach the device"
     is SecurityException -> "Bluetooth permission not granted"
     // Anything else is a system error; its message would only be a class name.
     else -> "Couldn't reach the device"
 }
 
-fun ago(millis: Long): String =
-    if (millis == 0L) "never"
-    else DateUtils.getRelativeTimeSpanString(millis, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
+/** How long ago [millis] was, briefly: "Just now", "5 min ago", "3 h ago", "2 d ago". */
+fun ago(millis: Long): String {
+    val minutes = ((System.currentTimeMillis() - millis) / 60_000).coerceAtLeast(0)
+    return when {
+        minutes < 1 -> "Just now"
+        minutes < 60 -> "$minutes min ago"
+        minutes < 24 * 60 -> "${minutes / 60} h ago"
+        else -> "${minutes / (24 * 60)} d ago"
+    }
+}
 
 /** "Mon–Fri", "Every day", "Weekends" or "Mon, Wed, Sat". */
 fun daysLabel(mask: Int): String {

@@ -28,8 +28,8 @@ class BatteryLogTest {
     }
 
     @Test fun smallRiseOrLowLevelIsNotAChange() {
-        var h = add(BatteryHistory(), 0, 2800) // 86%
-        h = add(h, 1, 3100) // 100%: only +14
+        var h = add(BatteryHistory(), 0, 2900) // 91%
+        h = add(h, 1, 3100) // 100%: only +9
         assertNull(h.replacedAt)
         h = add(BatteryHistory(), 0, 2450) // 14%
         h = add(h, 1, 2700) // 78%: big rise but below 90%

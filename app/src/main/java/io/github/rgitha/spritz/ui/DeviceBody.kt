@@ -95,22 +95,7 @@ fun DeviceBody(
         modifier.verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = gap,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Updated ${ago(d.statusAt)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (refreshing) {
-                Spacer(Modifier.width(8.dp))
-                CircularProgressIndicator(
-                    Modifier.size(12.dp),
-                    strokeWidth = 1.5.dp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        StatusCard(d, age, onBattery = { battery = true }, onSprays = { sprays = true })
+        StatusCard(d, age, refreshing, onRefresh = vm::refresh, onBattery = { battery = true }, onSprays = { sprays = true })
         Button(onClick = vm::spray, modifier = Modifier.fillMaxWidth().height(64.dp)) {
             // The widget's icon, so the two read as the same action.
             Icon(painterResource(R.drawable.ic_spray), contentDescription = null, modifier = Modifier.size(35.dp, 24.dp))
@@ -156,11 +141,46 @@ private fun BatteryAge.short(): String = when {
 }
 
 @Composable
-private fun StatusCard(d: SavedDevice, age: BatteryAge, onBattery: () -> Unit, onSprays: () -> Unit) {
+private fun StatusCard(
+    d: SavedDevice,
+    age: BatteryAge,
+    refreshing: Boolean,
+    onRefresh: () -> Unit,
+    onBattery: () -> Unit,
+    onSprays: () -> Unit,
+) {
     val s = d.status
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            StatusPill(d)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusPill(d)
+                Spacer(Modifier.weight(1f))
+                // How old the status is; tapping it reads it again.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        // As tall as the pill, so the row adds no space around it.
+                        .height(28.dp)
+                        .clickable(enabled = !refreshing, onClickLabel = "Refresh", onClick = onRefresh)
+                        .padding(start = 12.dp),
+                ) {
+                    if (d.statusAt > 0) {
+                        Text(
+                            ago(d.statusAt),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (refreshing) {
+                        Spacer(Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
             Row(Modifier.fillMaxWidth()) {
                 val battery = s?.batteryPercent
                 Level(
@@ -207,7 +227,8 @@ private fun StatusPill(d: SavedDevice) {
             Modifier.clip(RoundedCornerShape(14.dp)).clickable(onClickLabel = "Allow Bluetooth", onClick = ask),
         )
         !bluetoothOn() -> StatusChip("Bluetooth off", colors.surfaceVariant, colors.onSurfaceVariant, colors.outline)
-        reach == Reach.DISCONNECTED -> StatusChip("Disconnected", colors.errorContainer, colors.onErrorContainer, colors.error)
+        // Grey like the other "not available" states; only the dot is red, and softened.
+        reach == Reach.DISCONNECTED -> StatusChip("Disconnected", colors.surfaceVariant, colors.onSurfaceVariant, disconnectedDot())
         reach == Reach.UNKNOWN || mode == null -> Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier.height(28.dp).background(colors.surfaceVariant, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp),

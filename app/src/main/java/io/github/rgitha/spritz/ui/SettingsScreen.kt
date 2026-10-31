@@ -4,13 +4,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -31,9 +29,6 @@ import io.github.rgitha.spritz.data.Settings
 import io.github.rgitha.spritz.work.StatusPollWorker
 import kotlinx.coroutines.launch
 
-private val POLL_CHOICES = listOf(0 to "Off", 15 to "Every 15 minutes", 30 to "Every 30 minutes",
-    60 to "Every hour", 180 to "Every 3 hours", 360 to "Every 6 hours")
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
@@ -46,22 +41,15 @@ fun SettingsScreen(onBack: () -> Unit, onLog: () -> Unit) {
     Scaffold(topBar = { TopAppBar(title = { Text("App settings") }, navigationIcon = { BackButton(onBack) }) }) { padding ->
         val s = settings ?: return@Scaffold
         Column(Modifier.padding(padding).verticalScroll(rememberScrollState())) {
-            Section("Background checks")
-            Text(
-                "Spritz polls the device in the background to update status and provide notifications. " +
-                    "Less frequent polls save device batteries.",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(horizontal = 16.dp),
-            )
-            POLL_CHOICES.forEach { (minutes, label) ->
-                ListItem(
-                    headlineContent = { Text(label) },
-                    leadingContent = { RadioButton(selected = s.pollMinutes == minutes, onClick = null) },
-                    modifier = Modifier.selectable(selected = s.pollMinutes == minutes) {
-                        change { it.copy(pollMinutes = minutes) }
-                        StatusPollWorker.schedule(context, minutes)
-                    },
-                )
+            Toggle(
+                "Background checks",
+                s.pollMinutes > 0,
+                "Checks devices hourly for notifications. Off uses less battery; " +
+                    "status still updates when you open the app or tap to refresh.",
+            ) { on ->
+                val minutes = if (on) StatusPollWorker.DEFAULT_MINUTES else 0
+                change { it.copy(pollMinutes = minutes) }
+                StatusPollWorker.schedule(context, minutes)
             }
             HorizontalDivider()
             Section("Notifications")

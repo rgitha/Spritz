@@ -3,6 +3,7 @@ package io.github.rgitha.spritz.data
 import android.content.Context
 import io.github.rgitha.spritz.ble.AerClient
 import io.github.rgitha.spritz.ble.AerException
+import io.github.rgitha.spritz.ble.BusyException
 import io.github.rgitha.spritz.ble.AerClients
 import io.github.rgitha.spritz.ble.Presence
 import io.github.rgitha.spritz.ble.RefusedException
@@ -80,6 +81,9 @@ class SpritzRepository private constructor(private val context: Context) {
 
     suspend fun stopRun(address: String, run: Int) = record(address, exchange(address) { it.stopRun(run) })
 
+    /** Lights the device's interval lights for a few seconds; returns once they're on. */
+    suspend fun identify(address: String) = exchange(address) { it.identify() }
+
     suspend fun refillReset(address: String): DeviceStatus {
         val status = exchange(address) { it.refillReset() }
         // Whether 105 zeroes the counters isn't known yet, so remember where they stood.
@@ -155,6 +159,9 @@ class SpritzRepository private constructor(private val context: Context) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: RefusedException) {
+            noteExchange(address, true)
+            throw e
+        } catch (e: BusyException) {
             noteExchange(address, true)
             throw e
         } catch (e: Exception) {

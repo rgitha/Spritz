@@ -12,6 +12,7 @@ import android.os.SystemClock
 import io.github.rgitha.spritz.protocol.Cbor
 import io.github.rgitha.spritz.protocol.DeviceStatus
 import io.github.rgitha.spritz.protocol.Messages
+import io.github.rgitha.spritz.protocol.ModeSource
 import io.github.rgitha.spritz.protocol.MsgType
 import io.github.rgitha.spritz.protocol.Reply
 import io.github.rgitha.spritz.protocol.Schedule
@@ -38,6 +39,9 @@ class AerException(message: String, val kind: Kind = Kind.OTHER) : Exception(mes
 /** The device answered with ack 100. */
 class RefusedException(request: Int) : Exception("The device refused request $request")
 
+/** The device answered, but is busy with something that rules the request out. */
+class BusyException(message: String) : Exception(message)
+
 /**
  * Talks to one aer device. Operations are serialised; the link is opened on demand
  * and closed [IDLE_DISCONNECT_MS] after the last exchange to save the device's battery.
@@ -53,7 +57,9 @@ class AerClient(context: Context, val address: String) {
     private var disconnectJob: Job? = null
 
     /** Reads the status, setting the device's clock first on a fresh link. */
-    suspend fun readStatus(): DeviceStatus = run { l ->
+    suspend fun readStatus(): DeviceStatus = run { l -> freshStatus(l) }
+
+    private suspend fun freshStatus(l: Link): DeviceStatus {
         if (!l.timeSet) {
             l.waitSinceConnect(STATUS_DELAY_MS - 1000)
             setTime(l)
@@ -61,8 +67,46 @@ class AerClient(context: Context, val address: String) {
         } else {
             l.waitSinceConnect(STATUS_DELAY_MS)
         }
-        status(l)
+        return status(l)
     }
+
+    /**
+     * Lights the three interval lights so the device can be picked out; returns once
+     * they're on. Only while idle: clearing them takes "auto off", which would stop
+     * auto mode or pause a schedule run. They're cleared [IDENTIFY_MS] later.
+     */
+    suspend fun identify() {
+        run { l ->
+            val mode = freshStatus(l).mode
+            when {
+                mode.source == ModeSource.SCHEDULE ->
+                    throw BusyException("A schedule is running. Skip it or wait for it to end to use Identify.")
+                !mode.isIdle -> throw BusyException("Auto mode is running. Stop it to use Identify.")
+            }
+            l.request(Messages.ledTest(), MsgType.LED_TEST, "Light up").requireOk()
+            litAt = SystemClock.elapsedRealtime()
+        }
+        scope.launch {
+            delay(IDENTIFY_MS)
+            runCatching { run { l -> clearLights(l) } }
+        }
+    }
+
+    /**
+     * When the lights were lit and not yet cleared (a failed attempt is retried on the
+     * next connection): sends auto off if the device is still idle. Any other mode
+     * command already turned them off.
+     */
+    private suspend fun clearLights(l: Link) {
+        if (litAt == 0L || SystemClock.elapsedRealtime() - litAt < IDENTIFY_MS) return
+        if (freshStatus(l).mode.isIdle) {
+            l.request(Messages.stopAuto(), MsgType.STOP, "Lights off").requireOk()
+        }
+        litAt = 0L
+    }
+
+    /** When Identify lit the lights, while they're still to be cleared; 0 otherwise. */
+    @Volatile private var litAt = 0L
 
     /** Sprays once ([interval] 0) or starts auto mode, then reads the status back. */
     suspend fun spray(interval: Int = 0): DeviceStatus = command(
@@ -123,6 +167,8 @@ class AerClient(context: Context, val address: String) {
         try {
             if (link?.connected == false) drop() // the device went away while idle
             val l = link ?: connect().also { link = it }
+            // Lights left on by a failed clear; best effort, before the caller's work.
+            if (litAt != 0L) runCatching { clearLights(l) }
             try {
                 block(l)
             } catch (e: Exception) {
@@ -141,7 +187,7 @@ class AerClient(context: Context, val address: String) {
      * Bluetooth is being switched off) into one with a message for people.
      */
     private fun translate(e: Exception): Exception = when (e) {
-        is CancellationException, is AerException, is RefusedException, is SecurityException -> e
+        is CancellationException, is AerException, is RefusedException, is BusyException, is SecurityException -> e
         else -> {
             drop() // the link can't be trusted after this
             if (BlePermissions.adapter(context)?.isEnabled != true) {
@@ -166,7 +212,7 @@ class AerClient(context: Context, val address: String) {
                     when {
                         link !== l -> true
                         l.hasPending() || l.idleRemaining() > 0 -> false
-                        else -> { drop(); true }
+                        else -> { drop("Link closed (idle)"); true }
                     }
                 }
                 if (done) return@launch
@@ -175,8 +221,9 @@ class AerClient(context: Context, val address: String) {
         }
     }
 
-    private fun drop() {
-        link?.close()
+    /** Closes the link; [log] is what the connection log says, if it was still up. */
+    private fun drop(log: String = "Link closed") {
+        link?.close(log)
         link = null
     }
 
@@ -199,7 +246,7 @@ class AerClient(context: Context, val address: String) {
             } catch (e: Exception) {
                 // Read before closing: closing can report a drop of its own.
                 val dropped = l.dropStatus
-                l.close(log = false)
+                l.close(log = null)
                 // Android often drops a new link at once (status 133 or 62), mostly soon after
                 // an earlier one closed; a second try usually works.
                 if (dropped != null && !retried && e !is CancellationException) {
@@ -335,14 +382,16 @@ class AerClient(context: Context, val address: String) {
             }
         }
 
-        fun close(log: Boolean = true) {
+        fun close(log: String? = "Link closed") {
+            val wasUp = connected
             connected = false
             gatt?.let {
                 runCatching { it.disconnect() }
                 runCatching { it.close() }
             }
             gatt = null
-            if (log) BleLog.add(address, "Disconnected")
+            // A link that already dropped was logged as lost.
+            if (log != null && wasUp) BleLog.add(address, log)
         }
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -451,6 +500,8 @@ class AerClient(context: Context, val address: String) {
         const val REPLY_TIMEOUT_MS = 5_000L
         const val STATUS_DELAY_MS = 2_000L
         const val COMMAND_DELAY_MS = 500L
+        /** How long Identify keeps the lights on. */
+        const val IDENTIFY_MS = 3_000L
         const val SCHEDULE_UPLOAD_GAP_MS = 3_000L
         const val IDLE_DISCONNECT_MS = 15_000L
         const val FRAGMENT_TIMEOUT_MS = 2_000L
